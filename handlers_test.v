@@ -2657,3 +2657,326 @@ fn test_import_completions_local_module() {
 	assert local_results[0].detail == 'Local module'
 	assert local_results[0].insert_text or { '' } == 'mymod'
 }
+
+// ============================================================================
+// Tests for collect_module_fn_completions / parse_module_fn_completions
+// ============================================================================
+
+fn test_parse_module_fn_completions_basic() {
+	content := 'module main\n\npub fn helper(name string) string {\n\treturn name\n}\n\nfn private_fn() {}\n'
+	items := parse_module_fn_completions(content)
+	labels := items.map(it.label)
+	// pub fn should be present
+	assert 'helper' in labels
+	// plain fn should also be present (same-module functions are all accessible)
+	assert 'private_fn' in labels
+}
+
+fn test_parse_module_fn_completions_private_included() {
+	// Plain fn (no pub) must appear as a completion item
+	content := 'module main\n\nfn internal_helper(x int) int {\n\treturn x * 2\n}\n'
+	items := parse_module_fn_completions(content)
+	labels := items.map(it.label)
+	assert 'internal_helper' in labels
+}
+
+fn test_parse_module_fn_completions_skips_methods() {
+	content := 'module main\n\npub fn (r App) method_name() {}\n\nfn (mut app App) other_method() {}\n\npub fn free_fn() {}\n\nfn plain_free() {}\n'
+	items := parse_module_fn_completions(content)
+	labels := items.map(it.label)
+	// method receivers should be skipped (both pub and plain)
+	assert 'method_name' !in labels
+	assert 'other_method' !in labels
+	// free functions (pub and plain) should be included
+	assert 'free_fn' in labels
+	assert 'plain_free' in labels
+}
+
+fn test_parse_module_fn_completions_detail_string() {
+	content := 'module main\n\npub fn add(a int, b int) int {\n\treturn a + b\n}\n'
+	items := parse_module_fn_completions(content)
+	assert items.len == 1
+	assert items[0].label == 'add'
+	assert items[0].detail == 'pub fn add(a int, b int) int'
+	assert items[0].kind == 3
+}
+
+fn test_parse_module_fn_completions_void_fn() {
+	// Void fn (no return type) should be included — covers both pub fn and plain fn
+	content := 'module main\n\npub fn greet(name string) {\n\tprintln(name)\n}\n\nfn log_msg(msg string) {\n\teprintln(msg)\n}\n'
+	items := parse_module_fn_completions(content)
+	labels := items.map(it.label)
+	assert 'greet' in labels
+	assert 'log_msg' in labels
+}
+
+fn test_collect_module_fn_completions_skips_current_file() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	test_dir := os.join_path(app.temp_dir, 'project')
+	os.mkdir_all(test_dir) or { panic(err) }
+
+	current_file := os.join_path(test_dir, 'main.v')
+	sibling_file := os.join_path(test_dir, 'utils.v')
+
+	os.write_file(current_file, 'module main\n\npub fn current_fn() {}\n') or { panic(err) }
+	os.write_file(sibling_file, 'module main\n\npub fn sibling_fn() {}\n') or { panic(err) }
+
+	current_uri := path_to_uri(current_file)
+	app.open_files[current_uri] = 'module main\n\npub fn current_fn() {}\n'
+
+	items := app.collect_module_fn_completions(current_uri, test_dir)
+	labels := items.map(it.label)
+	// sibling pub fn should appear
+	assert 'sibling_fn' in labels
+	// current file's pub fn should NOT appear (avoid duplicates)
+	assert 'current_fn' !in labels
+}
+
+fn test_collect_module_fn_completions_skips_test_files() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	test_dir := os.join_path(app.temp_dir, 'project')
+	os.mkdir_all(test_dir) or { panic(err) }
+
+	current_file := os.join_path(test_dir, 'main.v')
+	test_file := os.join_path(test_dir, 'main_test.v')
+
+	os.write_file(current_file, 'module main\n\nfn main() {}\n') or { panic(err) }
+	os.write_file(test_file, 'module main\n\nfn test_something() {}\n') or { panic(err) }
+
+	current_uri := path_to_uri(current_file)
+	test_uri := path_to_uri(test_file)
+
+	// Simulate both files open in the editor
+	app.open_files[current_uri] = 'module main\n\nfn main() {}\n'
+	app.open_files[test_uri] = 'module main\n\nfn test_something() {}\n'
+
+	items := app.collect_module_fn_completions(current_uri, test_dir)
+	labels := items.map(it.label)
+	// test fn from _test.v must NOT appear in completions
+	assert 'test_something' !in labels
+}
+
+fn test_collect_module_fn_completions_prefers_open_files() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	test_dir := os.join_path(app.temp_dir, 'project')
+	os.mkdir_all(test_dir) or { panic(err) }
+
+	current_file := os.join_path(test_dir, 'main.v')
+	sibling_file := os.join_path(test_dir, 'utils.v')
+
+	// Write an old version to disk
+	os.write_file(current_file, 'module main\n') or { panic(err) }
+	os.write_file(sibling_file, 'module main\n\npub fn disk_fn() {}\n') or { panic(err) }
+
+	current_uri := path_to_uri(current_file)
+	sibling_uri := path_to_uri(sibling_file)
+
+	// In-memory version of sibling has a different (newer) function
+	app.open_files[current_uri] = 'module main\n'
+	app.open_files[sibling_uri] = 'module main\n\npub fn memory_fn() {}\n'
+
+	items := app.collect_module_fn_completions(current_uri, test_dir)
+	labels := items.map(it.label)
+	// In-memory version is used (sibling_uri already in searched_uris after open_files scan)
+	assert 'memory_fn' in labels
+	// disk_fn should NOT appear because the URI was already visited via open_files
+	assert 'disk_fn' !in labels
+}
+
+// ============================================================================
+// Tests for get_module_name
+// ============================================================================
+
+fn test_get_module_name_basic() {
+	assert get_module_name('module main\n\nfn main() {}\n') == 'main'
+	assert get_module_name('module foo\n') == 'foo'
+	assert get_module_name('module mypackage\n') == 'mypackage'
+}
+
+fn test_get_module_name_no_declaration() {
+	assert get_module_name('') == ''
+	assert get_module_name('fn main() {}\n') == ''
+}
+
+fn test_get_module_name_ignores_comments() {
+	// module keyword inside a comment is not a declaration
+	content := '// module notthis\nmodule real\n'
+	assert get_module_name(content) == 'real'
+}
+
+// ============================================================================
+// Cross-module filtering tests
+// ============================================================================
+
+fn test_collect_module_fn_completions_excludes_different_module() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	test_dir := os.join_path(app.temp_dir, 'project')
+	os.mkdir_all(test_dir) or { panic(err) }
+
+	current_file := os.join_path(test_dir, 'main.v')
+	other_file := os.join_path(test_dir, 'other.v')
+
+	os.write_file(current_file, 'module main\n\nfn main() {}\n') or { panic(err) }
+	// other.v belongs to a different module
+	os.write_file(other_file, 'module other\n\npub fn other_fn() {}\n') or { panic(err) }
+
+	current_uri := path_to_uri(current_file)
+	app.open_files[current_uri] = 'module main\n\nfn main() {}\n'
+
+	items := app.collect_module_fn_completions(current_uri, test_dir)
+	labels := items.map(it.label)
+	// other module's pub fn must NOT appear
+	assert 'other_fn' !in labels
+}
+
+fn test_collect_module_fn_completions_excludes_different_module_in_memory() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	test_dir := os.join_path(app.temp_dir, 'project')
+	os.mkdir_all(test_dir) or { panic(err) }
+
+	current_file := os.join_path(test_dir, 'main.v')
+	other_file := os.join_path(test_dir, 'lib.v')
+
+	os.write_file(current_file, 'module main\n') or { panic(err) }
+	os.write_file(other_file, 'module lib\n') or { panic(err) }
+
+	current_uri := path_to_uri(current_file)
+	other_uri := path_to_uri(other_file)
+
+	// User changed the module of lib.v in memory — now it's a different module
+	app.open_files[current_uri] = 'module main\n'
+	app.open_files[other_uri] = 'module lib\n\npub fn lib_fn() {}\n'
+
+	items := app.collect_module_fn_completions(current_uri, test_dir)
+	labels := items.map(it.label)
+	assert 'lib_fn' !in labels
+}
+
+// ============================================================================
+// Real-time module name change tests
+// ============================================================================
+
+fn test_collect_module_fn_completions_current_file_module_changed() {
+	// Simulates: user edits the current file's module declaration from `module main`
+	// to `module bar`. Completions should only show functions from files that
+	// also declare `module bar`.
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	test_dir := os.join_path(app.temp_dir, 'project')
+	os.mkdir_all(test_dir) or { panic(err) }
+
+	current_file := os.join_path(test_dir, 'main.v')
+	sibling_file := os.join_path(test_dir, 'utils.v')
+	bar_file := os.join_path(test_dir, 'bar_utils.v')
+
+	os.write_file(current_file, 'module main\n') or { panic(err) }
+	os.write_file(sibling_file, 'module main\n\npub fn main_fn() {}\n') or { panic(err) }
+	os.write_file(bar_file, 'module bar\n\npub fn bar_fn() {}\n') or { panic(err) }
+
+	current_uri := path_to_uri(current_file)
+
+	// User changes current file's module declaration to `bar` (unsaved)
+	app.open_files[current_uri] = 'module bar\n'
+
+	items := app.collect_module_fn_completions(current_uri, test_dir)
+	labels := items.map(it.label)
+	// bar_fn belongs to `module bar` → should appear
+	assert 'bar_fn' in labels
+	// main_fn belongs to `module main` → must NOT appear
+	assert 'main_fn' !in labels
+}
+
+fn test_collect_module_fn_completions_sibling_module_changed() {
+	// Simulates: sibling file's module declaration is changed in memory to a
+	// different module. Its functions must no longer appear in the current
+	// file's completions.
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	test_dir := os.join_path(app.temp_dir, 'project')
+	os.mkdir_all(test_dir) or { panic(err) }
+
+	current_file := os.join_path(test_dir, 'main.v')
+	sibling_file := os.join_path(test_dir, 'utils.v')
+
+	os.write_file(current_file, 'module main\n') or { panic(err) }
+	os.write_file(sibling_file, 'module main\n\npub fn sibling_fn() {}\n') or { panic(err) }
+
+	current_uri := path_to_uri(current_file)
+	sibling_uri := path_to_uri(sibling_file)
+
+	app.open_files[current_uri] = 'module main\n'
+	// User edits sibling's module declaration to `other` (unsaved)
+	app.open_files[sibling_uri] = 'module other\n\npub fn sibling_fn() {}\n'
+
+	items := app.collect_module_fn_completions(current_uri, test_dir)
+	labels := items.map(it.label)
+	// sibling_fn now belongs to `module other` → must NOT appear
+	assert 'sibling_fn' !in labels
+}
+
+fn test_operation_at_pos_completion_includes_current_file_fns() {
+	// Functions declared in the currently-edited file must appear in completions
+	// even when the V compiler's -line-info doesn't return them.
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	test_dir := os.join_path(app.temp_dir, 'project')
+	os.mkdir_all(test_dir) or { panic(err) }
+
+	test_file := os.join_path(test_dir, 'main.v')
+	content := 'module main\n\nfn local_helper() {}\n\nfn main() {\n\tlo\n}\n'
+	os.write_file(test_file, content) or { panic(err) }
+
+	uri := path_to_uri(test_file)
+	app.open_files[uri] = content
+	app.text = content
+
+	request := Request{
+		id:     1
+		params: Params{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+			position:      Position{
+				line: 5 // inside fn main, typing `lo`
+				char: 2
+			}
+		}
+	}
+
+	response := app.operation_at_pos(.completion, request)
+	assert response.id == 1
+	result := response.result
+	assert result is []Detail
+	details := result as []Detail
+	labels := details.map(it.label)
+	assert 'local_helper' in labels
+}

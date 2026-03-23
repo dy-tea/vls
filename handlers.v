@@ -68,6 +68,32 @@ fn (mut app App) operation_at_pos(method Method, request Request) Response {
 				details = result as []Detail
 			}
 			details << make_keyword_completions()
+			// Build dedup map from compiler + keyword results.
+			mut seen_labels := map[string]bool{}
+			for d in details {
+				seen_labels[d.label] = true
+			}
+			working_dir := os.dir(uri_to_path(path))
+			// Augment with fn completions from sibling files in the same module.
+			if working_dir != '' {
+				module_fns := app.collect_module_fn_completions(path, working_dir)
+				for d in module_fns {
+					if d.label !in seen_labels {
+						details << d
+						seen_labels[d.label] = true
+					}
+				}
+			}
+			// Also include functions declared in the current file itself.
+			// The compiler's -line-info does not always return all local functions
+			// (e.g. at the start of a function body or when syntax errors exist).
+			current_content := app.open_files[path] or { '' }
+			for d in parse_module_fn_completions(current_content) {
+				if d.label !in seen_labels {
+					details << d
+					seen_labels[d.label] = true
+				}
+			}
 			result = details
 		}
 	}
@@ -306,6 +332,21 @@ fn extract_doc_comment(lines []string, decl_line int) string {
 	// Use Markdown hard line breaks (two trailing spaces + newline) so each
 	// comment line renders on its own line in the hover popup.
 	return comments.join('  \n')
+}
+
+// get_module_name extracts the module name declared in V source content.
+// Returns '' if no module declaration is found.
+fn get_module_name(content string) string {
+	for line in content.split_into_lines() {
+		trimmed := line.trim_space()
+		if trimmed.starts_with('module ') {
+			name := trimmed[7..].trim_space()
+			if name != '' {
+				return name
+			}
+		}
+	}
+	return ''
 }
 
 // parse_imports extracts the module paths from `import` statements in `content`.
@@ -1101,6 +1142,93 @@ fn (mut app App) search_symbol_in_project(working_dir string, symbol string) []L
 		}
 	}
 	return locations
+}
+
+// collect_module_fn_completions scans sibling .v files in `working_dir` for
+// free-function declarations (both `pub fn` and `fn`) and returns them as completion items.
+// It checks in-memory open files first, then falls back to on-disk files,
+// skipping the current file (`current_file_uri`) to avoid duplicates.
+// Only files that declare the same module as the current file are included.
+fn (app &App) collect_module_fn_completions(current_file_uri string, working_dir string) []Detail {
+	mut items := []Detail{}
+	mut searched_uris := map[string]bool{}
+	searched_uris[current_file_uri] = true
+
+	// Determine the current file's module so we only include same-module siblings.
+	current_content := app.open_files[current_file_uri] or {
+		content := os.read_file(uri_to_path(current_file_uri)) or { '' }
+		content
+	}
+	current_module := get_module_name(current_content)
+
+	// 1. Scan in-memory open files
+	for uri, content in app.open_files {
+		if uri in searched_uris {
+			continue
+		}
+		if uri.ends_with('_test.v') {
+			continue
+		}
+		searched_uris[uri] = true
+		if current_module != '' && get_module_name(content) != current_module {
+			continue
+		}
+		items << parse_module_fn_completions(content)
+	}
+
+	// 2. Scan on-disk .v files in the working directory not yet processed
+	for v_file in os.walk_ext(working_dir, '.v') {
+		if v_file.ends_with('_test.v') {
+			continue
+		}
+		uri := path_to_uri(v_file)
+		if uri in searched_uris {
+			continue
+		}
+		searched_uris[uri] = true
+		content := os.read_file(v_file) or { continue }
+		if current_module != '' && get_module_name(content) != current_module {
+			continue
+		}
+		items << parse_module_fn_completions(content)
+	}
+
+	return items
+}
+
+// parse_module_fn_completions extracts free-function declarations (`pub fn` and `fn`)
+// from V source content and returns them as completion Detail items.
+// Method receivers (e.g. `fn (r Recv) method()`) are skipped.
+fn parse_module_fn_completions(content string) []Detail {
+	mut items := []Detail{}
+	for line in content.split_into_lines() {
+		trimmed := line.trim_space()
+		mut after_fn := ''
+		if trimmed.starts_with('pub fn ') {
+			after_fn = trimmed[7..]
+		} else if trimmed.starts_with('fn ') {
+			after_fn = trimmed[3..]
+		} else {
+			continue
+		}
+		// Skip method receivers: `fn (recv Recv) method_name(`
+		if after_fn.starts_with('(') {
+			continue
+		}
+		paren_idx := after_fn.index('(') or { continue }
+		fn_name := after_fn[..paren_idx].trim_space()
+		if fn_name == '' || fn_name.contains(' ') || fn_name.contains('[') {
+			continue
+		}
+		// Build the detail string: full signature up to (but not including) ` {`
+		detail_str := trimmed.all_before('{').trim_space()
+		items << Detail{
+			kind:   3 // CompletionItemKind.Function
+			label:  fn_name
+			detail: detail_str
+		}
+	}
+	return items
 }
 
 const v_keywords = ['asm', 'as', 'assert', 'atomic', 'break', 'const', 'continue', 'defer', 'dump',
