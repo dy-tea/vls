@@ -1,12 +1,12 @@
 ## VLS - V Language Server
 
-Early alpha.
-
 Build with: `v .`
 
-Copy the binary to `/tmp/vls2`. Later it will be configurable via the extension settings.
+Place the vls binary in your `PATH`. For example, on Linux you can place it in `/usr/local/bin`. On
+Windows, you can place it in a directory that is included in your `PATH`
+environment variable.
 
-Doesn't work on Windows yet, but it's easy to make it work.
+Otherwise, you can set the path to the vls binary in your editor's settings.
 
 #### Building the vscode vls extension
 
@@ -20,10 +20,9 @@ You should get a `vls-{version}.vsix` file.
 
 Or download the `vsix` file from here:
 
-https://github.com/vlang/vls/releases/download/0.1/vls-0.0.1.vsix
+https://github.com/vlang/vls/releases/
 
 In VS Code run `Extensions: Install from VSIX...`
-
 
 ### Features
 
@@ -34,7 +33,6 @@ In VS Code run `Extensions: Install from VSIX...`
 #### Go to definition
 
 https://github.com/user-attachments/assets/fb4ee6ff-4765-46b7-a21e-267691253d8e
-
 
 #### Autocomplete for module functions
 
@@ -47,6 +45,3 @@ https://github.com/user-attachments/assets/fb4ee6ff-4765-46b7-a21e-267691253d8e
 #### Autocomplete for struct fields and methods
 
 <img width="1804" height="392" alt="image" src="https://github.com/user-attachments/assets/478bfd20-201a-476f-88cd-583fad52d6cc" />
-
-
-

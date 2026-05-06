@@ -1,5 +1,8 @@
 import * as vscode from 'vscode';
 import { LanguageClient, LanguageClientOptions, ServerOptions } from 'vscode-languageclient/node';
+import * as fs from 'fs';
+import * as path from 'path';
+import { execFileSync } from 'child_process';
 
 let client: LanguageClient;
 
@@ -7,15 +10,55 @@ function isInlayHintsEnabled(): boolean {
   return vscode.workspace.getConfiguration('vls').get<boolean>('inlayHints.enabled', true);
 }
 
+function isExecutable(filePath: string): boolean {
+  try {
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function findInPath(bin: string): string | undefined {
+  const envPath = process.env.PATH || '';
+  const sep = process.platform === 'win32' ? ';' : ':';
+  for (const dir of envPath.split(sep)) {
+    const full = path.join(dir, bin);
+    if (fs.existsSync(full) && isExecutable(full)) {
+      return full;
+    }
+  }
+  return undefined;
+}
+
 export async function activate(context: vscode.ExtensionContext) {
   // Get the configuration for our server.
   const config = vscode.workspace.getConfiguration('vls');
-  const vlsPath = config.get<string>('command');
+  let vlsPath = config.get<string>('command');
+  const vlsArgs = config.get<string[]>('args', []);
 
-  // Check if the path to the VLS executable is configured.
+  // If not set, try to find 'vls' in PATH
   if (!vlsPath) {
+    const found = findInPath('vls');
+    if (!found) {
+      vscode.window.showErrorMessage(
+        'VLS binary not found. Set "vls.command" in your settings or ensure "vls" is in your PATH.'
+      );
+      return;
+    }
+    vlsPath = found;
+  }
+
+  // Check if the path to the VLS executable exists and is executable.
+  if (!fs.existsSync(vlsPath)) {
     vscode.window.showErrorMessage(
-      'The path to the V language server binary is not set. Please set "vls.command" in your settings.'
+      `VLS binary not found at path: ${vlsPath}. Set "vls.command" in your settings.`
+    );
+    return;
+  }
+  if (!isExecutable(vlsPath)) {
+    vscode.window.showErrorMessage(
+      `VLS binary at path: ${vlsPath} is not executable. Fix permissions or set "vls.command".`
     );
     return;
   }
@@ -23,8 +66,8 @@ export async function activate(context: vscode.ExtensionContext) {
   // ServerOptions tells the client how to launch our server.
   // We are launching it as a normal process and communicating via stdio.
   const serverOptions: ServerOptions = {
-    run: { command: vlsPath },
-    debug: { command: vlsPath }, // You can specify different flags for debugging
+    run: { command: vlsPath, args: vlsArgs },
+    debug: { command: vlsPath, args: vlsArgs }, // You can specify different flags for debugging
   };
 
   // ClientOptions controls the client-side of the connection.
@@ -33,6 +76,7 @@ export async function activate(context: vscode.ExtensionContext) {
     documentSelector: [{ scheme: 'file', language: 'v' }],
     // Synchronize the 'files' section of settings between client and server.
     synchronize: {
+      configurationSection: 'vls',
       fileEvents: vscode.workspace.createFileSystemWatcher('**/*.v'),
     },
     middleware: {

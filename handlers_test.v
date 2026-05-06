@@ -5,13 +5,30 @@ module main
 import os
 import json
 
-// ============================================================================
-// Tests for handler functionality
-// ============================================================================
+fn must_mkdir_all(path string) {
+	os.mkdir_all(path) or {
+		assert false, 'Failed to create directory ${path}: ${err}'
+		return
+	}
+}
+
+fn must_write_file(path string, content string) {
+	os.write_file(path, content) or {
+		assert false, 'Failed to write file ${path}: ${err}'
+		return
+	}
+}
 
 fn create_test_app() &App {
 	temp_dir := os.join_path(os.temp_dir(), 'vls_test_${os.getpid()}')
-	os.mkdir_all(temp_dir) or { panic('Failed to create test temp dir: ${err}') }
+	os.mkdir_all(temp_dir) or {
+		assert false, 'Failed to create test temp dir: ${err}'
+		return &App{
+			text:       ''
+			open_files: map[string]string{}
+			temp_dir:   temp_dir
+		}
+	}
 	return &App{
 		text:       ''
 		open_files: map[string]string{}
@@ -23,10 +40,6 @@ fn cleanup_test_app(app &App) {
 	os.rmdir_all(app.temp_dir) or {}
 }
 
-// ============================================================================
-// Tests for on_did_open handler
-// ============================================================================
-
 fn test_on_did_open_tracks_file() {
 	mut app := create_test_app()
 	defer {
@@ -35,21 +48,21 @@ fn test_on_did_open_tracks_file() {
 
 	// Create a temporary test file
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'test.v')
 	test_content := 'module main\n\nfn main() {\n\tprintln("hello")\n}'
-	os.write_file(test_file, test_content) or { panic(err) }
+	must_write_file(test_file, test_content)
 
 	uri := path_to_uri(test_file)
 	request := Request{
 		id:      1
 		method:  'textDocument/didOpen'
 		jsonrpc: '2.0'
-		params:  Params{
+		params:  json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	}
 
 	app.on_did_open(request)
@@ -68,32 +81,32 @@ fn test_on_did_open_multiple_files() {
 
 	// Create multiple test files
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 
 	test_file1 := os.join_path(test_dir, 'main.v')
 	test_file2 := os.join_path(test_dir, 'utils.v')
 	content1 := 'module main\n\nfn main() {}'
 	content2 := 'module main\n\nfn helper() {}'
 
-	os.write_file(test_file1, content1) or { panic(err) }
-	os.write_file(test_file2, content2) or { panic(err) }
+	must_write_file(test_file1, content1)
+	must_write_file(test_file2, content2)
 
 	uri1 := path_to_uri(test_file1)
 	uri2 := path_to_uri(test_file2)
 
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri1
 			}
-		}
+		})
 	})
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri2
 			}
-		}
+		})
 	})
 
 	assert app.open_files.len == 2
@@ -108,36 +121,36 @@ fn test_on_did_open_updates_current_text() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 
 	test_file1 := os.join_path(test_dir, 'first.v')
 	test_file2 := os.join_path(test_dir, 'second.v')
 	content1 := 'module main\n\nfn first() {}'
 	content2 := 'module main\n\nfn second() {}'
 
-	os.write_file(test_file1, content1) or { panic(err) }
-	os.write_file(test_file2, content2) or { panic(err) }
+	must_write_file(test_file1, content1)
+	must_write_file(test_file2, content2)
 
 	uri1 := path_to_uri(test_file1)
 	uri2 := path_to_uri(test_file2)
 
 	// Open first file
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri1
 			}
-		}
+		})
 	})
 	assert app.text == content1
 
 	// Open second file - app.text should update to second file's content
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri2
 			}
-		}
+		})
 	})
 	assert app.text == content2
 }
@@ -153,15 +166,58 @@ fn test_on_did_open_nonexistent_file() {
 	uri := path_to_uri(nonexistent)
 
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	})
 
 	// File should not be tracked if it doesn't exist
 	assert uri !in app.open_files
+}
+
+fn test_on_did_open_uses_text_document_payload() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	uri := path_to_uri(os.join_path(app.temp_dir, 'unsaved.v'))
+	content := 'module main\n\nfn main() {\n\tprintln("from_payload")\n}'
+	app.on_did_open(Request{
+		params: json.encode(DidOpenTextDocumentParams{
+			text_document: DidOpenTextDocumentItem{
+				uri:  uri
+				text: content
+			}
+		})
+	})
+
+	assert uri in app.open_files
+	assert app.open_files[uri] == content
+	assert app.text == content
+}
+
+fn test_on_did_open_uses_empty_text_payload_without_disk_fallback() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	uri := path_to_uri(os.join_path(app.temp_dir, 'unsaved_empty.v'))
+	app.on_did_open(Request{
+		params: json.encode(DidOpenTextDocumentParams{
+			text_document: DidOpenTextDocumentItem{
+				uri:  uri
+				text: ''
+			}
+		})
+	})
+
+	assert uri in app.open_files
+	assert app.open_files[uri] == ''
+	assert app.text == ''
 }
 
 fn test_on_did_open_empty_file() {
@@ -171,17 +227,17 @@ fn test_on_did_open_empty_file() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'empty.v')
-	os.write_file(test_file, '') or { panic(err) }
+	must_write_file(test_file, '')
 
 	uri := path_to_uri(test_file)
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	})
 
 	assert uri in app.open_files
@@ -196,41 +252,37 @@ fn test_on_did_open_reopen_same_file() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'test.v')
 
 	// Write initial content
 	content1 := 'module main\n\nfn main() {}'
-	os.write_file(test_file, content1) or { panic(err) }
+	must_write_file(test_file, content1)
 
 	uri := path_to_uri(test_file)
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	})
 	assert app.open_files[uri] == content1
 
 	// Update file content on disk
 	content2 := 'module main\n\nfn main() { updated }'
-	os.write_file(test_file, content2) or { panic(err) }
+	must_write_file(test_file, content2)
 
 	// Reopen the file - should get new content
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	})
 	assert app.open_files[uri] == content2
 }
-
-// ============================================================================
-// Tests for on_did_change handler
-// ============================================================================
 
 fn test_on_did_change_updates_content() {
 	mut app := create_test_app()
@@ -239,20 +291,20 @@ fn test_on_did_change_updates_content() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'test.v')
 	original_content := 'module main\n\nfn main() {}'
-	os.write_file(test_file, original_content) or { panic(err) }
+	must_write_file(test_file, original_content)
 
 	uri := path_to_uri(test_file)
 
 	// First open the file
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	})
 
 	// Then change it
@@ -261,14 +313,14 @@ fn test_on_did_change_updates_content() {
 		id:      2
 		method:  'textDocument/didChange'
 		jsonrpc: '2.0'
-		params:  Params{
+		params:  json.encode(Params{
 			text_document:   TextDocumentIdentifier{
 				uri: uri
 			}
 			content_changes: [ContentChange{
 				text: new_content
 			}]
-		}
+		})
 	}
 
 	app.on_did_change(request)
@@ -285,9 +337,9 @@ fn test_on_did_change_empty_changes() {
 
 	// Request with empty content changes should return none
 	request := Request{
-		params: Params{
+		params: json.encode(Params{
 			content_changes: []
-		}
+		})
 	}
 
 	result := app.on_did_change(request)
@@ -302,11 +354,11 @@ fn test_on_did_change_empty_text() {
 
 	// Request with empty text should return none
 	request := Request{
-		params: Params{
+		params: json.encode(Params{
 			content_changes: [ContentChange{
 				text: ''
 			}]
-		}
+		})
 	}
 
 	result := app.on_did_change(request)
@@ -320,29 +372,29 @@ fn test_on_did_change_returns_notification() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'test.v')
 	content := "module main\n\nfn main() {\n\tprintln('hello')\n}\n"
-	os.write_file(test_file, content) or { panic(err) }
+	must_write_file(test_file, content)
 
 	uri := path_to_uri(test_file)
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	})
 
 	request := Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document:   TextDocumentIdentifier{
 				uri: uri
 			}
 			content_changes: [ContentChange{
 				text: content
 			}]
-		}
+		})
 	}
 
 	result := app.on_did_change(request)
@@ -361,17 +413,17 @@ fn test_on_did_change_multiple_changes() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'test.v')
-	os.write_file(test_file, 'module main') or { panic(err) }
+	must_write_file(test_file, 'module main')
 
 	uri := path_to_uri(test_file)
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	})
 
 	// Simulate multiple sequential changes
@@ -383,14 +435,14 @@ fn test_on_did_change_multiple_changes() {
 
 	for change in changes {
 		request := Request{
-			params: Params{
+			params: json.encode(Params{
 				text_document:   TextDocumentIdentifier{
 					uri: uri
 				}
 				content_changes: [ContentChange{
 					text: change
 				}]
-			}
+			})
 		}
 		app.on_did_change(request)
 		assert app.text == change
@@ -405,19 +457,19 @@ fn test_on_did_change_updates_tracked_file() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'test.v')
-	os.write_file(test_file, 'original') or { panic(err) }
+	must_write_file(test_file, 'original')
 
 	uri := path_to_uri(test_file)
 
 	// Open file
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	})
 
 	// Verify initial state
@@ -426,14 +478,14 @@ fn test_on_did_change_updates_tracked_file() {
 	// Change file
 	new_content := 'modified content'
 	app.on_did_change(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document:   TextDocumentIdentifier{
 				uri: uri
 			}
 			content_changes: [ContentChange{
 				text: new_content
 			}]
-		}
+		})
 	})
 
 	// Verify both app.text and open_files are updated
@@ -441,9 +493,37 @@ fn test_on_did_change_updates_tracked_file() {
 	assert app.open_files[uri] == new_content
 }
 
-// ============================================================================
-// Tests for operation_at_pos handler
-// ============================================================================
+fn test_apply_incremental_change_handles_utf8_columns() {
+	content := 'aéz\n'
+	range := LSPRange{
+		start: Position{
+			line: 0
+			char: 1
+		}
+		end:   Position{
+			line: 0
+			char: 2
+		}
+	}
+	updated := apply_incremental_change(content, range, 'X')
+	assert updated == 'aXz'
+}
+
+fn test_apply_incremental_change_handles_multiline_ranges() {
+	content := 'abc\ndef\nghi'
+	range := LSPRange{
+		start: Position{
+			line: 0
+			char: 1
+		}
+		end:   Position{
+			line: 1
+			char: 2
+		}
+	}
+	updated := apply_incremental_change(content, range, '_\n_')
+	assert updated == 'a_\n_f\nghi'
+}
 
 fn test_operation_at_pos_completion_line_info() {
 	mut app := create_test_app()
@@ -452,10 +532,10 @@ fn test_operation_at_pos_completion_line_info() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'test.v')
 	content := 'module main\n\nfn main() {\n\tos.\n}\n'
-	os.write_file(test_file, content) or { panic(err) }
+	must_write_file(test_file, content)
 
 	uri := path_to_uri(test_file)
 	app.text = content
@@ -464,7 +544,7 @@ fn test_operation_at_pos_completion_line_info() {
 	request := Request{
 		id:     1
 		method: 'textDocument/completion'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
@@ -472,7 +552,7 @@ fn test_operation_at_pos_completion_line_info() {
 				line: 3
 				char: 4
 			}
-		}
+		})
 	}
 
 	response := app.operation_at_pos(.completion, request)
@@ -486,10 +566,10 @@ fn test_operation_at_pos_definition_line_info() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'test.v')
 	content := 'module main\n\nfn helper() {}\n\nfn main() {\n\thelper()\n}\n'
-	os.write_file(test_file, content) or { panic(err) }
+	must_write_file(test_file, content)
 
 	uri := path_to_uri(test_file)
 	app.text = content
@@ -498,7 +578,7 @@ fn test_operation_at_pos_definition_line_info() {
 	request := Request{
 		id:     2
 		method: 'textDocument/definition'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
@@ -506,7 +586,7 @@ fn test_operation_at_pos_definition_line_info() {
 				line: 5
 				char: 2
 			}
-		}
+		})
 	}
 
 	response := app.operation_at_pos(.definition, request)
@@ -520,10 +600,10 @@ fn test_operation_at_pos_signature_help_line_info() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'test.v')
 	content := 'module main\n\nfn greet(name string) {}\n\nfn main() {\n\tgreet(\n}\n'
-	os.write_file(test_file, content) or { panic(err) }
+	must_write_file(test_file, content)
 
 	uri := path_to_uri(test_file)
 	app.text = content
@@ -532,7 +612,7 @@ fn test_operation_at_pos_signature_help_line_info() {
 	request := Request{
 		id:     3
 		method: 'textDocument/signatureHelp'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
@@ -540,7 +620,7 @@ fn test_operation_at_pos_signature_help_line_info() {
 				line: 5
 				char: 7
 			}
-		}
+		})
 	}
 
 	response := app.operation_at_pos(.signature_help, request)
@@ -554,10 +634,10 @@ fn test_operation_at_pos_preserves_request_id() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'test.v')
 	content := 'module main\n\nfn main() {}\n'
-	os.write_file(test_file, content) or { panic(err) }
+	must_write_file(test_file, content)
 
 	uri := path_to_uri(test_file)
 	app.text = content
@@ -568,7 +648,7 @@ fn test_operation_at_pos_preserves_request_id() {
 	for id in test_ids {
 		request := Request{
 			id:     id
-			params: Params{
+			params: json.encode(Params{
 				text_document: TextDocumentIdentifier{
 					uri: uri
 				}
@@ -576,16 +656,12 @@ fn test_operation_at_pos_preserves_request_id() {
 					line: 2
 					char: 0
 				}
-			}
+			})
 		}
 		response := app.operation_at_pos(.completion, request)
 		assert response.id == id
 	}
 }
-
-// ============================================================================
-// Tests for JSON encoding/decoding
-// ============================================================================
 
 fn test_json_encode_response() {
 	response := Response{
@@ -732,8 +808,12 @@ fn test_json_decode_request() {
 	}
 	assert request.id == 1
 	assert request.method == 'textDocument/completion'
-	assert request.params.position.line == 5
-	assert request.params.position.char == 10
+	params := json.decode(Params, request.params.str()) or {
+		assert false, 'Failed to decode params: ${err}'
+		return
+	}
+	assert params.position.line == 5
+	assert params.position.char == 10
 }
 
 fn test_json_decode_request_with_content_changes() {
@@ -743,8 +823,12 @@ fn test_json_decode_request_with_content_changes() {
 		return
 	}
 	assert request.method == 'textDocument/didChange'
-	assert request.params.content_changes.len == 1
-	assert request.params.content_changes[0].text == 'fn main() {}'
+	params := json.decode(Params, request.params.str()) or {
+		assert false, 'Failed to decode params: ${err}'
+		return
+	}
+	assert params.content_changes.len == 1
+	assert params.content_changes[0].text == 'fn main() {}'
 }
 
 fn test_json_decode_request_initialize() {
@@ -765,13 +849,22 @@ fn test_json_decode_request_definition() {
 	}
 	assert request.id == 5
 	assert request.method == 'textDocument/definition'
-	assert request.params.position.line == 10
-	assert request.params.position.char == 5
+	params := json.decode(Params, request.params.str()) or {
+		assert false, 'Failed to decode params: ${err}'
+		return
+	}
+	assert params.position.line == 10
+	assert params.position.char == 5
 }
 
-// ============================================================================
-// Tests for deduplication of diagnostics
-// ============================================================================
+fn test_json_decode_request_params_malformed_returns_error() {
+	malformed_params := '{"textDocument":{"uri":"file:///test.v"},"position":{"line":5,"character":}}'
+	if _ := json.decode(Params, malformed_params) {
+		assert false, 'Expected malformed params JSON to fail decoding'
+	} else {
+		assert true
+	}
+}
 
 fn test_diagnostics_deduplication() {
 	// This tests the deduplication logic in on_did_change
@@ -860,10 +953,6 @@ fn test_diagnostics_deduplication_empty() {
 	assert count == 0
 }
 
-// ============================================================================
-// Tests for ResponseResult union type
-// ============================================================================
-
 fn test_response_result_string() {
 	result := ResponseResult('null')
 	if result is string {
@@ -882,8 +971,8 @@ fn test_response_result_details() {
 	]
 	result := ResponseResult(details)
 	if result is []Detail {
-		assert result.len == 1
-		assert result[0].label == 'test'
+		assert result.len == 1, 'Expected 1 detail, got ${result.len}'
+		assert result[0].label == 'test', 'Expected label test, got ${result[0].label}'
 	} else {
 		assert false, 'Expected []Detail result'
 	}
@@ -927,10 +1016,6 @@ fn test_response_result_location() {
 	}
 }
 
-// ============================================================================
-// Tests for App initialization
-// ============================================================================
-
 fn test_app_initialization() {
 	app := create_test_app()
 	defer {
@@ -950,13 +1035,8 @@ fn test_app_cur_mod_default() {
 
 fn test_app_exit_flag_default() {
 	app := App{}
-	// exit flag depends on os.args, just verify it's boolean
-	_ := app.exit
+	app.exit
 }
-
-// ============================================================================
-// Tests for v_error_to_lsp_diagnostic conversion
-// ============================================================================
 
 fn test_v_error_to_lsp_diagnostic_basic() {
 	v_err := JsonError{
@@ -1054,10 +1134,6 @@ fn test_v_error_to_lsp_diagnostic_always_error_severity() {
 	assert diag.severity == 1 // Always Error severity
 }
 
-// ============================================================================
-// Tests for multifile project handling
-// ============================================================================
-
 fn test_multifile_tracking() {
 	mut app := create_test_app()
 	defer {
@@ -1065,20 +1141,20 @@ fn test_multifile_tracking() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 
 	// Create 3 files
 	files := ['main.v', 'utils.v', 'helpers.v']
 	for file in files {
 		path := os.join_path(test_dir, file)
-		os.write_file(path, 'module main\n\nfn ${file}() {}') or { panic(err) }
+		must_write_file(path, 'module main\n\nfn ${file}() {}')
 		uri := path_to_uri(path)
 		app.on_did_open(Request{
-			params: Params{
+			params: json.encode(Params{
 				text_document: TextDocumentIdentifier{
 					uri: uri
 				}
-			}
+			})
 		})
 	}
 
@@ -1092,54 +1168,50 @@ fn test_multifile_change_single_file() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 
 	main_file := os.join_path(test_dir, 'main.v')
 	utils_file := os.join_path(test_dir, 'utils.v')
 
-	os.write_file(main_file, 'module main\n\nfn main() {}') or { panic(err) }
-	os.write_file(utils_file, 'module main\n\nfn helper() {}') or { panic(err) }
+	must_write_file(main_file, 'module main\n\nfn main() {}')
+	must_write_file(utils_file, 'module main\n\nfn helper() {}')
 
 	main_uri := path_to_uri(main_file)
 	utils_uri := path_to_uri(utils_file)
 
 	// Open both files
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: main_uri
 			}
-		}
+		})
 	})
 	app.on_did_open(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: utils_uri
 			}
-		}
+		})
 	})
 
 	// Change only main.v
 	new_content := 'module main\n\nfn main() { changed }'
 	app.on_did_change(Request{
-		params: Params{
+		params: json.encode(Params{
 			text_document:   TextDocumentIdentifier{
 				uri: main_uri
 			}
 			content_changes: [ContentChange{
 				text: new_content
 			}]
-		}
+		})
 	})
 
 	// Verify only main.v was updated
 	assert app.open_files[main_uri] == new_content
 	assert app.open_files[utils_uri].contains('helper') // utils unchanged
 }
-
-// ============================================================================
-// Tests for formatting handler
-// ============================================================================
 
 fn test_handle_formatting_formats_code() {
 	mut app := create_test_app()
@@ -1148,12 +1220,12 @@ fn test_handle_formatting_formats_code() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'test.v')
 
 	// Badly formatted content
 	unformatted := 'module main\n\nfn   badly_formatted(   x    int,y int   )int{\nreturn x+y\n}'
-	os.write_file(test_file, unformatted) or { panic(err) }
+	must_write_file(test_file, unformatted)
 
 	uri := path_to_uri(test_file)
 	app.open_files[uri] = unformatted
@@ -1162,11 +1234,11 @@ fn test_handle_formatting_formats_code() {
 		id:      1
 		method:  'textDocument/formatting'
 		jsonrpc: '2.0'
-		params:  Params{
+		params:  json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	}
 
 	response := app.handle_formatting(request)
@@ -1193,12 +1265,12 @@ fn test_handle_formatting_already_formatted() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'test.v')
 
 	// Already well-formatted content
 	formatted := 'module main\n\nfn main() {\n\tprintln("hello")\n}\n'
-	os.write_file(test_file, formatted) or { panic(err) }
+	must_write_file(test_file, formatted)
 
 	uri := path_to_uri(test_file)
 	app.open_files[uri] = formatted
@@ -1207,11 +1279,11 @@ fn test_handle_formatting_already_formatted() {
 		id:      2
 		method:  'textDocument/formatting'
 		jsonrpc: '2.0'
-		params:  Params{
+		params:  json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	}
 
 	response := app.handle_formatting(request)
@@ -1238,11 +1310,11 @@ fn test_handle_formatting_nonexistent_file() {
 		id:      3
 		method:  'textDocument/formatting'
 		jsonrpc: '2.0'
-		params:  Params{
+		params:  json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	}
 
 	response := app.handle_formatting(request)
@@ -1262,11 +1334,11 @@ fn test_handle_formatting_uses_open_file_content() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'test.v')
 
 	// File on disk has different content
-	os.write_file(test_file, 'module main\n\nfn old() {}') or { panic(err) }
+	must_write_file(test_file, 'module main\n\nfn old() {}')
 
 	uri := path_to_uri(test_file)
 	// In-memory content is different
@@ -1276,11 +1348,11 @@ fn test_handle_formatting_uses_open_file_content() {
 		id:      4
 		method:  'textDocument/formatting'
 		jsonrpc: '2.0'
-		params:  Params{
+		params:  json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	}
 
 	response := app.handle_formatting(request)
@@ -1296,9 +1368,77 @@ fn test_handle_formatting_uses_open_file_content() {
 	}
 }
 
-// ============================================================================
-// Tests for parse_document_symbols
-// ============================================================================
+fn test_find_references_returns_null_when_no_symbol_at_position() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	test_dir := os.join_path(app.temp_dir, 'project')
+	must_mkdir_all(test_dir)
+	test_file := os.join_path(test_dir, 'refs.v')
+	content := 'module main\n\nfn main() {\n\tprintln("hi")\n}\n'
+	must_write_file(test_file, content)
+
+	uri := path_to_uri(test_file)
+	app.open_files[uri] = content
+
+	resp := app.find_references(Request{
+		id:     901
+		method: 'textDocument/references'
+		params: json.encode(ReferenceParams{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+			position:      Position{
+				line: 1
+				char: 0
+			}
+			context:       ReferenceContext{
+				include_declaration: true
+			}
+		})
+	})
+
+	assert resp.id == 901
+	assert resp.result is string
+	assert (resp.result as string) == 'null'
+}
+
+fn test_handle_rename_returns_null_when_no_symbol_at_position() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	test_dir := os.join_path(app.temp_dir, 'project')
+	must_mkdir_all(test_dir)
+	test_file := os.join_path(test_dir, 'rename.v')
+	content := 'module main\n\nfn main() {\n\tprintln("hi")\n}\n'
+	must_write_file(test_file, content)
+
+	uri := path_to_uri(test_file)
+	app.open_files[uri] = content
+
+	resp := app.handle_rename(Request{
+		id:     902
+		method: 'textDocument/rename'
+		params: json.encode(RenameParams{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+			position:      Position{
+				line: 1
+				char: 0
+			}
+			new_name:      'renamed'
+		})
+	})
+
+	assert resp.id == 902
+	assert resp.result is string
+	assert (resp.result as string) == 'null'
+}
 
 fn test_parse_document_symbols_empty_content() {
 	syms := parse_document_symbols('')
@@ -1389,6 +1529,7 @@ fn test_parse_document_symbols_type_alias() {
 fn test_parse_document_symbols_multiple_declarations() {
 	content := 'module main
 
+// greet is a simple function
 pub fn greet(name string) string {
 	return name
 }
@@ -1459,10 +1600,6 @@ fn test_parse_document_symbols_selection_range_points_to_name() {
 	assert sym.selection_range.end.char == expected_col + 'my_func'.len
 }
 
-// ============================================================================
-// Tests for extract_fn_name helper
-// ============================================================================
-
 fn test_extract_fn_name_simple() {
 	assert extract_fn_name('main() {}') == 'main'
 }
@@ -1491,10 +1628,6 @@ fn test_extract_fn_name_whitespace_only() {
 	assert extract_fn_name('   ') == ''
 }
 
-// ============================================================================
-// Tests for first_word helper
-// ============================================================================
-
 fn test_first_word_simple() {
 	assert first_word('Person {}') == 'Person'
 }
@@ -1515,10 +1648,6 @@ fn test_first_word_empty() {
 	assert first_word('') == ''
 }
 
-// ============================================================================
-// Tests for first_word_paren helper
-// ============================================================================
-
 fn test_first_word_paren_simple() {
 	assert first_word_paren('foo(a int) string') == 'foo'
 }
@@ -1534,10 +1663,6 @@ fn test_first_word_paren_empty() {
 fn test_first_word_paren_stops_at_space() {
 	assert first_word_paren('bar baz') == 'bar'
 }
-
-// ============================================================================
-// Tests for extract_const_name helper
-// ============================================================================
 
 fn test_extract_const_name_simple() {
 	assert extract_const_name('max_size = 100') == 'max_size'
@@ -1556,10 +1681,6 @@ fn test_extract_const_name_whitespace_only() {
 	assert extract_const_name('   ') == ''
 }
 
-// ============================================================================
-// Tests for handle_document_symbols handler
-// ============================================================================
-
 fn test_handle_document_symbols_empty_file() {
 	mut app := create_test_app()
 	defer {
@@ -1572,11 +1693,11 @@ fn test_handle_document_symbols_empty_file() {
 	request := Request{
 		id:     10
 		method: 'textDocument/documentSymbol'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	}
 
 	response := app.handle_document_symbols(request)
@@ -1598,11 +1719,11 @@ fn test_handle_document_symbols_no_tracked_file() {
 	request := Request{
 		id:     11
 		method: 'textDocument/documentSymbol'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: 'file:///tmp/not_tracked.v'
 			}
-		}
+		})
 	}
 
 	response := app.handle_document_symbols(request)
@@ -1626,11 +1747,11 @@ fn test_handle_document_symbols_returns_correct_symbols() {
 	request := Request{
 		id:     12
 		method: 'textDocument/documentSymbol'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	}
 
 	response := app.handle_document_symbols(request)
@@ -1661,11 +1782,11 @@ fn test_handle_document_symbols_preserves_request_id() {
 		request := Request{
 			id:     id
 			method: 'textDocument/documentSymbol'
-			params: Params{
+			params: json.encode(Params{
 				text_document: TextDocumentIdentifier{
 					uri: uri
 				}
-			}
+			})
 		}
 		response := app.handle_document_symbols(request)
 		assert response.id == id
@@ -1697,11 +1818,11 @@ const my_const = 42
 	request := Request{
 		id:     20
 		method: 'textDocument/documentSymbol'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
-		}
+		})
 	}
 
 	response := app.handle_document_symbols(request)
@@ -1725,10 +1846,6 @@ const my_const = 42
 		assert false, 'Expected []DocumentSymbol'
 	}
 }
-
-// ============================================================================
-// Tests for extract_doc_comment helper
-// ============================================================================
 
 fn test_extract_doc_comment_single_line() {
 	lines := ['// greet says hello', 'fn greet() {}']
@@ -1769,10 +1886,6 @@ fn test_extract_doc_comment_at_first_line() {
 	comment := extract_doc_comment(lines, 0)
 	assert comment == ''
 }
-
-// ============================================================================
-// Tests for find_declaration_line helper
-// ============================================================================
 
 fn test_find_declaration_line_function() {
 	lines := ['module main', '', 'fn my_func() {}']
@@ -1816,10 +1929,6 @@ fn test_find_declaration_line_not_found() {
 	assert idx == -1
 }
 
-// ============================================================================
-// Tests for get_word_at_col helper
-// ============================================================================
-
 fn test_get_word_at_col_middle_of_word() {
 	line := 'fn my_func() {}'
 	word := get_word_at_col(line, 4)
@@ -1843,10 +1952,6 @@ fn test_get_word_at_col_beyond_end() {
 	word := get_word_at_col(line, 100)
 	assert word == ''
 }
-
-// ============================================================================
-// Tests for parse_imports helper
-// ============================================================================
 
 fn test_parse_imports_single() {
 	content := 'module main\n\nimport os\n\nfn main() {}'
@@ -1877,10 +1982,6 @@ fn test_parse_imports_none() {
 	imports := parse_imports(content)
 	assert imports == []
 }
-
-// ============================================================================
-// Tests for find_doc_comment_for_symbol (cross-file search)
-// ============================================================================
 
 fn test_find_doc_comment_for_symbol_current_file() {
 	mut app := create_test_app()
@@ -1925,10 +2026,6 @@ fn test_find_doc_comment_for_symbol_not_found() {
 	doc := app.find_doc_comment_for_symbol('nonexistent', lines, uri)
 	assert doc == ''
 }
-
-// ============================================================================
-// Tests for infer_type_from_literal
-// ============================================================================
 
 fn test_infer_type_integer() {
 	assert infer_type_from_literal('42') == 'int'
@@ -1990,10 +2087,6 @@ fn test_infer_type_empty_skipped() {
 	assert infer_type_from_literal('') == ''
 }
 
-// ============================================================================
-// Tests for extract_fn_call
-// ============================================================================
-
 fn test_extract_fn_call_qualified() {
 	mod_name, fn_name := extract_fn_call('os.temp_dir()')
 	assert mod_name == 'os'
@@ -2024,10 +2117,6 @@ fn test_extract_fn_call_literal_not_a_call() {
 	assert fn_name == ''
 }
 
-// ============================================================================
-// Tests for build_fn_index
-// ============================================================================
-
 fn test_build_fn_index_basic() {
 	mut app := create_test_app()
 	defer {
@@ -2044,10 +2133,6 @@ fn test_build_fn_index_basic() {
 	assert 'handle' !in index
 	assert 'do_nothing' !in index
 }
-
-// ============================================================================
-// Tests for lookup_fn_return_type
-// ============================================================================
 
 fn test_lookup_fn_return_type_qualified() {
 	index := {
@@ -2068,10 +2153,6 @@ fn test_lookup_fn_return_type_not_found() {
 	index := map[string]string{}
 	assert lookup_fn_return_type('unknown_fn()', index) == ''
 }
-
-// ============================================================================
-// Tests for handle_inlay_hints
-// ============================================================================
 
 fn test_handle_inlay_hints_basic() {
 	mut app := create_test_app()
@@ -2094,7 +2175,7 @@ obj := MyStruct{}
 	request := Request{
 		id:     30
 		method: 'textDocument/inlayHint'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
@@ -2108,7 +2189,7 @@ obj := MyStruct{}
 					char: 0
 				}
 			}
-		}
+		})
 	}
 
 	response := app.handle_inlay_hints(request)
@@ -2143,7 +2224,7 @@ x := 99
 	request := Request{
 		id:     31
 		method: 'textDocument/inlayHint'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
@@ -2157,7 +2238,7 @@ x := 99
 					char: 0
 				}
 			}
-		}
+		})
 	}
 
 	response := app.handle_inlay_hints(request)
@@ -2188,7 +2269,7 @@ fn test_handle_inlay_hints_empty_file() {
 	request := Request{
 		id:     32
 		method: 'textDocument/inlayHint'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
@@ -2202,7 +2283,7 @@ fn test_handle_inlay_hints_empty_file() {
 					char: 0
 				}
 			}
-		}
+		})
 	}
 
 	response := app.handle_inlay_hints(request)
@@ -2229,7 +2310,7 @@ mut count := 0
 	request := Request{
 		id:     33
 		method: 'textDocument/inlayHint'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
@@ -2243,7 +2324,7 @@ mut count := 0
 					char: 0
 				}
 			}
-		}
+		})
 	}
 
 	response := app.handle_inlay_hints(request)
@@ -2276,7 +2357,7 @@ const is_debug = false
 	request := Request{
 		id:     34
 		method: 'textDocument/inlayHint'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
@@ -2290,7 +2371,7 @@ const is_debug = false
 					char: 0
 				}
 			}
-		}
+		})
 	}
 
 	response := app.handle_inlay_hints(request)
@@ -2329,7 +2410,7 @@ enabled   = true
 	request := Request{
 		id:     35
 		method: 'textDocument/inlayHint'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
@@ -2343,7 +2424,7 @@ enabled   = true
 					char: 0
 				}
 			}
-		}
+		})
 	}
 
 	response := app.handle_inlay_hints(request)
@@ -2378,7 +2459,7 @@ fn test_handle_inlay_hints_local_fn_call() {
 	request := Request{
 		id:     40
 		method: 'textDocument/inlayHint'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
@@ -2392,7 +2473,7 @@ fn test_handle_inlay_hints_local_fn_call() {
 					char: 0
 				}
 			}
-		}
+		})
 	}
 	response := app.handle_inlay_hints(request)
 	if response.result is []InlayHint {
@@ -2421,7 +2502,7 @@ fn test_handle_inlay_hints_error_result_fn() {
 	request := Request{
 		id:     41
 		method: 'textDocument/inlayHint'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
@@ -2435,7 +2516,7 @@ fn test_handle_inlay_hints_error_result_fn() {
 					char: 0
 				}
 			}
-		}
+		})
 	}
 	response := app.handle_inlay_hints(request)
 	if response.result is []InlayHint {
@@ -2469,7 +2550,7 @@ greeting := get_greeting()
 	request := Request{
 		id:     50
 		method: 'textDocument/inlayHint'
-		params: Params{
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
@@ -2483,7 +2564,7 @@ greeting := get_greeting()
 					char: 0
 				}
 			}
-		}
+		})
 	}
 	response := app.handle_inlay_hints(request)
 	if response.result is []InlayHint {
@@ -2494,10 +2575,6 @@ greeting := get_greeting()
 		assert false, 'Expected []InlayHint'
 	}
 }
-
-// ============================================================================
-// Tests for keyword/builtin completion augmentation
-// ============================================================================
 
 fn test_make_keyword_completions_not_empty() {
 	items := make_keyword_completions()
@@ -2592,9 +2669,6 @@ fn test_make_keyword_completions_contains_error_with_code() {
 	assert 'error_with_code' in labels
 }
 
-// Tests for get_import_completions
-// ============================================================================
-
 fn test_import_completions_non_import_line() {
 	results := get_import_completions('fn main() {', '')
 	assert results.len == 0
@@ -2620,7 +2694,7 @@ fn test_import_completions_partial_prefix() {
 }
 
 fn test_import_completions_nested() {
-	encoding_dir := os.join_path(@VEXEROOT, 'vlib', 'encoding')
+	encoding_dir := os.join_path(v_dir, 'vlib', 'encoding')
 	if !os.is_dir(encoding_dir) {
 		return
 	}
@@ -2638,15 +2712,15 @@ fn test_import_completions_nested() {
 
 fn test_import_completions_local_module() {
 	temp_dir := os.join_path(os.temp_dir(), 'vls_import_test_${os.getpid()}')
-	os.mkdir_all(temp_dir) or { panic(err) }
+	must_mkdir_all(temp_dir)
 	defer {
 		os.rmdir_all(temp_dir) or {}
 	}
 
 	// Create a local module directory with a .v file
 	mymod_dir := os.join_path(temp_dir, 'mymod')
-	os.mkdir_all(mymod_dir) or { panic(err) }
-	os.write_file(os.join_path(mymod_dir, 'mymod.v'), 'module mymod\n') or { panic(err) }
+	must_mkdir_all(mymod_dir)
+	must_write_file(os.join_path(mymod_dir, 'mymod.v'), 'module mymod\n')
 
 	results := get_import_completions('import ', temp_dir)
 	labels := results.map(it.label)
@@ -2657,10 +2731,6 @@ fn test_import_completions_local_module() {
 	assert local_results[0].detail == 'Local module'
 	assert local_results[0].insert_text or { '' } == 'mymod'
 }
-
-// ============================================================================
-// Tests for collect_module_fn_completions / parse_module_fn_completions
-// ============================================================================
 
 fn test_parse_module_fn_completions_basic() {
 	content := 'module main\n\npub fn helper(name string) string {\n\treturn name\n}\n\nfn private_fn() {}\n'
@@ -2717,13 +2787,13 @@ fn test_collect_module_fn_completions_skips_current_file() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 
 	current_file := os.join_path(test_dir, 'main.v')
 	sibling_file := os.join_path(test_dir, 'utils.v')
 
-	os.write_file(current_file, 'module main\n\npub fn current_fn() {}\n') or { panic(err) }
-	os.write_file(sibling_file, 'module main\n\npub fn sibling_fn() {}\n') or { panic(err) }
+	must_write_file(current_file, 'module main\n\npub fn current_fn() {}\n')
+	must_write_file(sibling_file, 'module main\n\npub fn sibling_fn() {}\n')
 
 	current_uri := path_to_uri(current_file)
 	app.open_files[current_uri] = 'module main\n\npub fn current_fn() {}\n'
@@ -2743,13 +2813,13 @@ fn test_collect_module_fn_completions_skips_test_files() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 
 	current_file := os.join_path(test_dir, 'main.v')
 	test_file := os.join_path(test_dir, 'main_test.v')
 
-	os.write_file(current_file, 'module main\n\nfn main() {}\n') or { panic(err) }
-	os.write_file(test_file, 'module main\n\nfn test_something() {}\n') or { panic(err) }
+	must_write_file(current_file, 'module main\n\nfn main() {}\n')
+	must_write_file(test_file, 'module main\n\nfn test_something() {}\n')
 
 	current_uri := path_to_uri(current_file)
 	test_uri := path_to_uri(test_file)
@@ -2771,14 +2841,14 @@ fn test_collect_module_fn_completions_prefers_open_files() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 
 	current_file := os.join_path(test_dir, 'main.v')
 	sibling_file := os.join_path(test_dir, 'utils.v')
 
 	// Write an old version to disk
-	os.write_file(current_file, 'module main\n') or { panic(err) }
-	os.write_file(sibling_file, 'module main\n\npub fn disk_fn() {}\n') or { panic(err) }
+	must_write_file(current_file, 'module main\n')
+	must_write_file(sibling_file, 'module main\n\npub fn disk_fn() {}\n')
 
 	current_uri := path_to_uri(current_file)
 	sibling_uri := path_to_uri(sibling_file)
@@ -2794,10 +2864,6 @@ fn test_collect_module_fn_completions_prefers_open_files() {
 	// disk_fn should NOT appear because the URI was already visited via open_files
 	assert 'disk_fn' !in labels
 }
-
-// ============================================================================
-// Tests for get_module_name
-// ============================================================================
 
 fn test_get_module_name_basic() {
 	assert get_module_name('module main\n\nfn main() {}\n') == 'main'
@@ -2816,10 +2882,6 @@ fn test_get_module_name_ignores_comments() {
 	assert get_module_name(content) == 'real'
 }
 
-// ============================================================================
-// Cross-module filtering tests
-// ============================================================================
-
 fn test_collect_module_fn_completions_excludes_different_module() {
 	mut app := create_test_app()
 	defer {
@@ -2827,14 +2889,14 @@ fn test_collect_module_fn_completions_excludes_different_module() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 
 	current_file := os.join_path(test_dir, 'main.v')
 	other_file := os.join_path(test_dir, 'other.v')
 
-	os.write_file(current_file, 'module main\n\nfn main() {}\n') or { panic(err) }
+	must_write_file(current_file, 'module main\n\nfn main() {}\n')
 	// other.v belongs to a different module
-	os.write_file(other_file, 'module other\n\npub fn other_fn() {}\n') or { panic(err) }
+	must_write_file(other_file, 'module other\n\npub fn other_fn() {}\n')
 
 	current_uri := path_to_uri(current_file)
 	app.open_files[current_uri] = 'module main\n\nfn main() {}\n'
@@ -2852,13 +2914,13 @@ fn test_collect_module_fn_completions_excludes_different_module_in_memory() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 
 	current_file := os.join_path(test_dir, 'main.v')
 	other_file := os.join_path(test_dir, 'lib.v')
 
-	os.write_file(current_file, 'module main\n') or { panic(err) }
-	os.write_file(other_file, 'module lib\n') or { panic(err) }
+	must_write_file(current_file, 'module main\n')
+	must_write_file(other_file, 'module lib\n')
 
 	current_uri := path_to_uri(current_file)
 	other_uri := path_to_uri(other_file)
@@ -2872,10 +2934,6 @@ fn test_collect_module_fn_completions_excludes_different_module_in_memory() {
 	assert 'lib_fn' !in labels
 }
 
-// ============================================================================
-// Real-time module name change tests
-// ============================================================================
-
 fn test_collect_module_fn_completions_current_file_module_changed() {
 	// Simulates: user edits the current file's module declaration from `module main`
 	// to `module bar`. Completions should only show functions from files that
@@ -2886,15 +2944,15 @@ fn test_collect_module_fn_completions_current_file_module_changed() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 
 	current_file := os.join_path(test_dir, 'main.v')
 	sibling_file := os.join_path(test_dir, 'utils.v')
 	bar_file := os.join_path(test_dir, 'bar_utils.v')
 
-	os.write_file(current_file, 'module main\n') or { panic(err) }
-	os.write_file(sibling_file, 'module main\n\npub fn main_fn() {}\n') or { panic(err) }
-	os.write_file(bar_file, 'module bar\n\npub fn bar_fn() {}\n') or { panic(err) }
+	must_write_file(current_file, 'module main\n')
+	must_write_file(sibling_file, 'module main\n\npub fn main_fn() {}\n')
+	must_write_file(bar_file, 'module bar\n\npub fn bar_fn() {}\n')
 
 	current_uri := path_to_uri(current_file)
 
@@ -2919,13 +2977,13 @@ fn test_collect_module_fn_completions_sibling_module_changed() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
+	must_mkdir_all(test_dir)
 
 	current_file := os.join_path(test_dir, 'main.v')
 	sibling_file := os.join_path(test_dir, 'utils.v')
 
-	os.write_file(current_file, 'module main\n') or { panic(err) }
-	os.write_file(sibling_file, 'module main\n\npub fn sibling_fn() {}\n') or { panic(err) }
+	must_write_file(current_file, 'module main\n\npub fn current_fn() {}\n')
+	must_write_file(sibling_file, 'module main\n\npub fn sibling_fn() {}\n')
 
 	current_uri := path_to_uri(current_file)
 	sibling_uri := path_to_uri(sibling_file)
@@ -2949,11 +3007,10 @@ fn test_operation_at_pos_completion_includes_current_file_fns() {
 	}
 
 	test_dir := os.join_path(app.temp_dir, 'project')
-	os.mkdir_all(test_dir) or { panic(err) }
-
+	must_mkdir_all(test_dir)
 	test_file := os.join_path(test_dir, 'main.v')
-	content := 'module main\n\nfn local_helper() {}\n\nfn main() {\n\tlo\n}\n'
-	os.write_file(test_file, content) or { panic(err) }
+	content := 'module main\n\nfn local_helper() {}\n\nfn main() {\n\tos.\n}\n'
+	must_write_file(test_file, content)
 
 	uri := path_to_uri(test_file)
 	app.open_files[uri] = content
@@ -2961,22 +3018,636 @@ fn test_operation_at_pos_completion_includes_current_file_fns() {
 
 	request := Request{
 		id:     1
-		params: Params{
+		method: 'textDocument/completion'
+		params: json.encode(Params{
 			text_document: TextDocumentIdentifier{
 				uri: uri
 			}
 			position:      Position{
-				line: 5 // inside fn main, typing `lo`
-				char: 2
+				line: 3
+				char: 4
 			}
-		}
+		})
 	}
 
 	response := app.operation_at_pos(.completion, request)
 	assert response.id == 1
 	result := response.result
-	assert result is []Detail
-	details := result as []Detail
-	labels := details.map(it.label)
+	assert result is CompletionList
+	cl := result as CompletionList
+	assert cl.is_incomplete == false
+	labels := cl.items.map(it.label)
 	assert 'local_helper' in labels
+}
+
+fn test_operation_at_pos_dot_completion_includes_imported_module_members() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	test_dir := os.join_path(app.temp_dir, 'project_dot_completion')
+	mod_dir := os.join_path(test_dir, 'my_mod')
+	must_mkdir_all(mod_dir)
+
+	must_write_file(os.join_path(mod_dir, 'my_mod.v'),
+		'module my_mod\n\npub fn greet(name string) string {\n\treturn name\n}\n\nfn hidden() {}\n')
+
+	main_file := os.join_path(test_dir, 'main.v')
+	content := 'module main\n\nimport my_mod\n\nfn main() {\n\tmy_mod.\n}\n'
+	must_write_file(main_file, content)
+
+	uri := path_to_uri(main_file)
+	app.open_files[uri] = content
+	app.text = content
+
+	response := app.operation_at_pos(.completion, Request{
+		id:     9001
+		method: 'textDocument/completion'
+		params: json.encode(Params{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+			position:      Position{
+				line: 5
+				char: 8
+			}
+		})
+	})
+
+	assert response.result is CompletionList
+	cl := response.result as CompletionList
+	labels := cl.items.map(it.label)
+	assert 'greet' in labels
+	assert 'hidden' !in labels
+}
+
+fn test_operation_at_pos_dot_completion_includes_aliased_import_module_members() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	test_dir := os.join_path(app.temp_dir, 'project_dot_completion_alias')
+	mod_dir := os.join_path(test_dir, 'my_mod')
+	must_mkdir_all(mod_dir)
+
+	must_write_file(os.join_path(mod_dir, 'my_mod.v'), 'module my_mod\n\npub fn ping() {}\n')
+
+	main_file := os.join_path(test_dir, 'main.v')
+	content := 'module main\n\nimport my_mod as mm\n\nfn main() {\n\tmm.\n}\n'
+	must_write_file(main_file, content)
+
+	uri := path_to_uri(main_file)
+	app.open_files[uri] = content
+	app.text = content
+
+	response := app.operation_at_pos(.completion, Request{
+		id:     9002
+		method: 'textDocument/completion'
+		params: json.encode(Params{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+			position:      Position{
+				line: 5
+				char: 4
+			}
+		})
+	})
+
+	assert response.result is CompletionList
+	cl := response.result as CompletionList
+	labels := cl.items.map(it.label)
+	assert 'ping' in labels
+}
+
+fn test_semantic_tokens_returns_data_for_known_content() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+	uri := 'file:///tmp/semtok.v'
+	content := 'module main\n\nfn main() {\n\tprintln("hello")\n}\n'
+	app.open_files[uri] = content
+
+	resp := app.handle_semantic_tokens(Request{
+		id:     800
+		method: 'textDocument/semanticTokens/full'
+		params: json.encode(SemanticTokensParams{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+		})
+	})
+
+	assert resp.id == 800
+	assert resp.result is SemanticTokens
+	tokens := resp.result as SemanticTokens
+	// A V file with keywords/strings should yield at least some tokens.
+	assert tokens.data.len > 0
+}
+
+fn test_semantic_tokens_returns_null_for_empty_file() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+	uri := 'file:///tmp/empty.v'
+	app.open_files[uri] = ''
+
+	resp := app.handle_semantic_tokens(Request{
+		id:     801
+		method: 'textDocument/semanticTokens/full'
+		params: json.encode(SemanticTokensParams{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+		})
+	})
+
+	assert resp.id == 801
+	assert resp.result is string
+	assert (resp.result as string) == 'null'
+}
+
+fn test_semantic_tokens_range_returns_null_for_invalid_params() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	resp := app.handle_semantic_tokens_range(Request{
+		id:     802
+		method: 'textDocument/semanticTokens/range'
+		params: '{}'
+	})
+
+	assert resp.id == 802
+	assert resp.result is string
+	assert (resp.result as string) == 'null'
+}
+
+// ── code lens ────────────────────────────────────────────────────────────────
+
+fn test_code_lens_returns_run_lens_for_main() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+	uri := 'file:///tmp/codelens_main.v'
+	content := 'module main\n\nfn main() {\n\tprintln("hi")\n}\n'
+	app.open_files[uri] = content
+
+	resp := app.handle_code_lens(Request{
+		id:     810
+		method: 'textDocument/codeLens'
+		params: json.encode(CodeLensParams{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+		})
+	})
+
+	assert resp.id == 810
+	assert resp.result is []CodeLens
+	lenses := resp.result as []CodeLens
+	assert lenses.any(it.command?.command == 'vls.runFile')
+}
+
+fn test_code_lens_returns_test_lens_for_test_fn() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+	uri := 'file:///tmp/codelens_test.v'
+	content := 'module main\n\nfn test_something() {\n\tassert true\n}\n'
+	app.open_files[uri] = content
+
+	resp := app.handle_code_lens(Request{
+		id:     811
+		method: 'textDocument/codeLens'
+		params: json.encode(CodeLensParams{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+		})
+	})
+
+	assert resp.id == 811
+	assert resp.result is []CodeLens
+	lenses := resp.result as []CodeLens
+	assert lenses.any(it.command?.command == 'vls.runTests')
+}
+
+fn test_code_lens_resolve_returns_same_lens() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+	lens := CodeLens{
+		range:   LSPRange{
+			start: Position{
+				line: 2
+				char: 0
+			}
+			end:   Position{
+				line: 2
+				char: 10
+			}
+		}
+		command: Command{
+			title:     '▶ Run'
+			command:   'vls.runFile'
+			arguments: ['file:///tmp/a.v']
+		}
+	}
+
+	resp := app.handle_code_lens_resolve(Request{
+		id:     812
+		method: 'codeLens/resolve'
+		params: json.encode(lens)
+	})
+
+	assert resp.id == 812
+	assert resp.result is CodeLens
+	resolved := resp.result as CodeLens
+	assert resolved.command?.command == 'vls.runFile'
+}
+
+// ── execute command ───────────────────────────────────────────────────────────
+
+fn test_execute_command_returns_null_result() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	resp := app.handle_execute_command(Request{
+		id:     820
+		method: 'workspace/executeCommand'
+		params: json.encode(ExecuteCommandParams{
+			command: 'vls.runFile'
+		})
+	})
+
+	assert resp.id == 820
+	assert resp.result is string
+	assert (resp.result as string) == 'null'
+}
+
+fn test_execute_command_unknown_still_returns_null() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	resp := app.handle_execute_command(Request{
+		id:     821
+		method: 'workspace/executeCommand'
+		params: json.encode(ExecuteCommandParams{
+			command: 'unknownCommand'
+		})
+	})
+
+	assert resp.id == 821
+	assert resp.result is string
+	assert (resp.result as string) == 'null'
+}
+
+// ── inline value ─────────────────────────────────────────────────────────────
+
+fn test_inline_value_returns_values_for_simple_assignment() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+	uri := 'file:///tmp/inlineval.v'
+	content := 'module main\n\nfn main() {\n\tx := 42\n\ty := "hello"\n}\n'
+	app.open_files[uri] = content
+
+	resp := app.handle_inline_value(Request{
+		id:     830
+		method: 'textDocument/inlineValue'
+		params: json.encode(InlineValueParams{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+			range:         LSPRange{
+				start: Position{
+					line: 0
+					char: 0
+				}
+				end:   Position{
+					line: 5
+					char: 0
+				}
+			}
+		})
+	})
+
+	assert resp.id == 830
+	assert resp.result is []InlineValueText
+	values := resp.result as []InlineValueText
+	assert values.len > 0
+	assert values.any(it.text == ': int' || it.text == ': string')
+}
+
+fn test_inline_value_returns_empty_for_no_assignments() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+	uri := 'file:///tmp/inlineval_empty.v'
+	app.open_files[uri] = 'module main\n\nfn main() {}\n'
+
+	resp := app.handle_inline_value(Request{
+		id:     831
+		method: 'textDocument/inlineValue'
+		params: json.encode(InlineValueParams{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+			range:         LSPRange{
+				start: Position{
+					line: 0
+					char: 0
+				}
+				end:   Position{
+					line: 2
+					char: 0
+				}
+			}
+		})
+	})
+
+	assert resp.id == 831
+	assert resp.result is []InlineValueText
+	values := resp.result as []InlineValueText
+	assert values.len == 0
+}
+
+// ── linked editing range ──────────────────────────────────────────────────────
+
+fn test_linked_editing_range_returns_ranges_for_identifier() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+	uri := 'file:///tmp/linked.v'
+	// Line 2: `foo := foo + 1` — "foo" appears twice
+	content := 'module main\n\nfn main() {\n\tfoo := foo\n}\n'
+	app.open_files[uri] = content
+
+	resp := app.handle_linked_editing_range(Request{
+		id:     840
+		method: 'textDocument/linkedEditingRange'
+		params: json.encode(TextDocumentPositionParams{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+			position:      Position{
+				line: 3
+				char: 2
+			}
+		})
+	})
+
+	assert resp.id == 840
+	assert resp.result is LinkedEditingRanges
+	ler := resp.result as LinkedEditingRanges
+	assert ler.ranges.len >= 2
+}
+
+fn test_linked_editing_range_returns_null_when_not_on_identifier() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+	uri := 'file:///tmp/linked2.v'
+	content := 'module main\n\nfn main() {}\n'
+	app.open_files[uri] = content
+
+	// Position on an empty line
+	resp := app.handle_linked_editing_range(Request{
+		id:     841
+		method: 'textDocument/linkedEditingRange'
+		params: json.encode(TextDocumentPositionParams{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+			position:      Position{
+				line: 1
+				char: 0
+			}
+		})
+	})
+
+	assert resp.id == 841
+	assert resp.result is string
+	assert (resp.result as string) == 'null'
+}
+
+// ── selection range ───────────────────────────────────────────────────────────
+
+fn test_selection_range_returns_one_entry_per_position() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+	uri := 'file:///tmp/selrange.v'
+	content := 'module main\n\nfn main() {\n\thello := 1\n}\n'
+	app.open_files[uri] = content
+
+	resp := app.handle_selection_range(Request{
+		id:     850
+		method: 'textDocument/selectionRange'
+		params: json.encode(SelectionRangeParams{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+			positions:     [Position{
+				line: 3
+				char: 2
+			}, Position{
+				line: 3
+				char: 7
+			}]
+		})
+	})
+
+	assert resp.id == 850
+	assert resp.result is []SelectionRange
+	ranges := resp.result as []SelectionRange
+	assert ranges.len == 2
+}
+
+fn test_selection_range_word_range_has_parent_line_range() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+	uri := 'file:///tmp/selrange2.v'
+	content := 'module main\n\nfn main() {\n\thello := 1\n}\n'
+	app.open_files[uri] = content
+
+	resp := app.handle_selection_range(Request{
+		id:     851
+		method: 'textDocument/selectionRange'
+		params: json.encode(SelectionRangeParams{
+			text_document: TextDocumentIdentifier{
+				uri: uri
+			}
+			positions:     [Position{
+				line: 3
+				char: 2
+			}]
+		})
+	})
+
+	assert resp.result is []SelectionRange
+	ranges := resp.result as []SelectionRange
+	assert ranges.len == 1
+	// Inner word range should be smaller than or equal to parent line range
+	entry := ranges[0]
+	if parent := entry.parent {
+		assert parent.range.start.char == 0
+	}
+}
+
+// ── on-type formatting ────────────────────────────────────────────────────────
+
+fn test_on_type_formatting_returns_empty_edits() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	resp := app.handle_on_type_formatting(Request{
+		id:     860
+		method: 'textDocument/onTypeFormatting'
+		params: json.encode(OnTypeFormattingParams{
+			text_document: TextDocumentIdentifier{
+				uri: 'file:///tmp/fmt.v'
+			}
+			position:      Position{
+				line: 3
+				char: 0
+			}
+			ch:            '}'
+		})
+	})
+
+	assert resp.id == 860
+	assert resp.result is []TextEdit
+	edits := resp.result as []TextEdit
+	assert edits.len == 0
+}
+
+// ── call hierarchy outgoing ──────────────────────────────────────────────────
+
+fn test_call_hierarchy_outgoing_returns_callees() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	root := os.join_path(app.temp_dir, 'call_out')
+	must_mkdir_all(root)
+	file_path := os.join_path(root, 'main.v')
+	content := 'module main\n\nfn helper() {}\n\nfn main() {\n\thelper()\n}\n'
+	must_write_file(file_path, content)
+	uri := path_to_uri(file_path)
+	app.open_files[uri] = content
+	app.workspace_roots = [root]
+
+	resp := app.handle_call_hierarchy_outgoing(Request{
+		id:     870
+		method: 'callHierarchy/outgoingCalls'
+		params: json.encode(CallHierarchyOutgoingCallsParams{
+			item: CallHierarchyItem{
+				name:            'main'
+				kind:            sym_kind_function
+				uri:             uri
+				range:           LSPRange{
+					start: Position{
+						line: 4
+						char: 0
+					}
+					end:   Position{
+						line: 6
+						char: 1
+					}
+				}
+				selection_range: LSPRange{
+					start: Position{
+						line: 4
+						char: 3
+					}
+					end:   Position{
+						line: 4
+						char: 7
+					}
+				}
+			}
+		})
+	})
+
+	assert resp.id == 870
+	assert resp.result is []CallHierarchyOutgoingCall
+	calls := resp.result as []CallHierarchyOutgoingCall
+	assert calls.any(it.to.name == 'helper')
+}
+
+fn test_call_hierarchy_incoming_returns_callers() {
+	mut app := create_test_app()
+	defer {
+		cleanup_test_app(app)
+	}
+
+	root := os.join_path(app.temp_dir, 'call_in')
+	must_mkdir_all(root)
+	file_path := os.join_path(root, 'main.v')
+	content := 'module main\n\nfn helper() {}\n\nfn main() {\n\thelper()\n}\n'
+	must_write_file(file_path, content)
+	uri := path_to_uri(file_path)
+	app.open_files[uri] = content
+	app.workspace_roots = [root]
+
+	resp := app.handle_call_hierarchy_incoming(Request{
+		id:     871
+		method: 'callHierarchy/incomingCalls'
+		params: json.encode(CallHierarchyIncomingCallsParams{
+			item: CallHierarchyItem{
+				name:            'helper'
+				kind:            sym_kind_function
+				uri:             uri
+				range:           LSPRange{
+					start: Position{
+						line: 2
+						char: 0
+					}
+					end:   Position{
+						line: 2
+						char: 15
+					}
+				}
+				selection_range: LSPRange{
+					start: Position{
+						line: 2
+						char: 3
+					}
+					end:   Position{
+						line: 2
+						char: 9
+					}
+				}
+			}
+		})
+	})
+
+	assert resp.id == 871
+	assert resp.result is []CallHierarchyIncomingCall
+	calls := resp.result as []CallHierarchyIncomingCall
+	assert calls.any(it.from.name == 'main')
 }

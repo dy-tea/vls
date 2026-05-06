@@ -3,6 +3,22 @@
 module main
 
 import os
+import json
+import time
+
+fn interop_test_must_mkdir_all(path string) {
+	os.mkdir_all(path) or {
+		assert false, 'Failed to create directory ${path}: ${err}'
+		return
+	}
+}
+
+fn interop_test_must_write_file(path string, content string) {
+	os.write_file(path, content) or {
+		assert false, 'Failed to write file ${path}: ${err}'
+		return
+	}
+}
 
 // ============================================================================
 // Unit tests for interop utilities (URI/path conversion)
@@ -127,6 +143,96 @@ fn test_path_uri_roundtrip_multiple() {
 		back := uri_to_path(uri)
 		assert back == path
 	}
+}
+
+fn test_make_singlefile_temp_path_uses_given_root() {
+	temp_root := os.join_path(os.temp_dir(), 'vls_interop_temp_root')
+	path := make_singlefile_temp_path(temp_root, '/tmp/example.v', 'check')
+	assert path.starts_with(temp_root)
+	assert path.ends_with('.v')
+	assert path.contains('vls_check_')
+}
+
+fn test_make_singlefile_temp_path_has_unique_tag_for_purpose() {
+	root := os.temp_dir()
+	path_a := make_singlefile_temp_path(root, '/tmp/example.v', 'lineinfo')
+	path_b := make_singlefile_temp_path(root, '/tmp/example.v', 'check')
+	assert path_a != path_b
+}
+
+fn test_make_singlefile_temp_path_avoids_test_suffix_regression() {
+	root := os.temp_dir()
+	path := make_singlefile_temp_path(root, '/tmp/test.v', 'check')
+	assert !path.ends_with('_test.v')
+	assert path.ends_with('.v')
+}
+
+fn test_cleanup_compilation_temp_removes_singlefile_path() {
+	tmppath := os.join_path(os.temp_dir(),
+		'vls_cleanup_single_${os.getpid()}_${time.now().unix_nano()}.v')
+	interop_test_must_write_file(tmppath, 'module main\n')
+	assert os.exists(tmppath)
+	cleanup_compilation_temp('', tmppath)
+	assert !os.exists(tmppath)
+}
+
+fn test_cleanup_compilation_temp_removes_project_dir() {
+	project_dir := os.join_path(os.temp_dir(),
+		'vls_cleanup_project_${os.getpid()}_${time.now().unix_nano()}')
+	interop_test_must_mkdir_all(project_dir)
+	interop_test_must_write_file(os.join_path(project_dir, 'main.v'), 'module main\n')
+	assert os.exists(project_dir)
+	cleanup_compilation_temp(project_dir, '')
+	assert !os.exists(project_dir)
+}
+
+fn test_ensure_stderr_captured_appends_redirect() {
+	cmd := ensure_stderr_captured('echo hello')
+	assert cmd.ends_with('2>&1')
+}
+
+fn test_ensure_stderr_captured_keeps_existing_redirect() {
+	cmd := ensure_stderr_captured('echo hello 2>&1')
+	assert cmd == 'echo hello 2>&1'
+}
+
+fn test_execute_in_dir_restores_working_directory() {
+	original := os.getwd()
+	work_dir := os.join_path(os.temp_dir(), 'vls_exec_dir_${os.getpid()}_${time.now().unix_nano()}')
+	interop_test_must_mkdir_all(work_dir)
+	defer {
+		os.rmdir_all(work_dir) or {}
+	}
+
+	result := execute_in_dir(work_dir, 'pwd')
+	assert result.output.trim_space() == work_dir
+	assert os.getwd() == original
+}
+
+fn test_execute_in_dir_returns_error_when_directory_missing() {
+	original := os.getwd()
+	missing_dir := os.join_path(os.temp_dir(),
+		'vls_missing_dir_${os.getpid()}_${time.now().unix_nano()}')
+	result := execute_in_dir(missing_dir, 'pwd')
+	assert result.exit_code != 0
+	assert result.output.contains('Failed to change to working dir')
+	assert os.getwd() == original
+}
+
+fn test_shell_quote_handles_single_quotes() {
+	quoted := shell_quote("a'b")
+	assert quoted == '\'a\'"\'"\'b\''
+}
+
+fn test_build_v_check_cmd_single_quotes_path() {
+	cmd := build_v_check_cmd_single('/tmp/a b/test.v')
+	assert cmd.contains("'/tmp/a b/test.v'")
+	assert cmd.contains('-vls-mode')
+}
+
+fn test_build_v_fmt_cmd_quotes_temp_file() {
+	cmd := build_v_fmt_cmd('/tmp/fmt file.v')
+	assert cmd == "v fmt -inprocess '/tmp/fmt file.v'"
 }
 
 // ============================================================================
@@ -466,7 +572,7 @@ fn test_request_struct() {
 		id:      1
 		method:  'textDocument/completion'
 		jsonrpc: '2.0'
-		params:  Params{
+		params:  json.encode(Params{
 			position:      Position{
 				line: 5
 				char: 10
@@ -474,18 +580,24 @@ fn test_request_struct() {
 			text_document: TextDocumentIdentifier{
 				uri: 'file:///test.v'
 			}
-		}
+		})
 	}
 	assert req.id == 1
 	assert req.method == 'textDocument/completion'
-	assert req.params.position.line == 5
+	params := json.decode(Params, req.params.str()) or {
+		assert false, 'decode failed: ${err}'
+		return
+	}
+	assert params.position.line == 5
 }
 
-fn test_request_default_values() {
-	req := Request{}
-	assert req.id == 0
-	assert req.method == ''
-	assert req.jsonrpc == ''
+fn test_request_params_decode_malformed_returns_error() {
+	malformed := '{"textDocument":{"uri":"file:///test.v"},"position":{"line":5,"character":}}'
+	if _ := json.decode(Params, malformed) {
+		assert false, 'Expected malformed params JSON to fail decoding'
+	} else {
+		assert true
+	}
 }
 
 fn test_response_struct() {
@@ -571,16 +683,13 @@ fn test_content_change_unicode() {
 
 fn test_write_tracked_files_to_temp_single_file() {
 	temp_dir := os.join_path(os.temp_dir(), 'vls_interop_test_${os.getpid()}')
-	os.mkdir_all(temp_dir) or { panic(err) }
-	defer {
-		os.rmdir_all(temp_dir) or {}
-	}
+	interop_test_must_mkdir_all(temp_dir)
 
 	project_dir := os.join_path(temp_dir, 'project')
-	os.mkdir_all(project_dir) or { panic(err) }
+	interop_test_must_mkdir_all(project_dir)
 
 	test_file := os.join_path(project_dir, 'main.v')
-	os.write_file(test_file, 'module main') or { panic(err) }
+	interop_test_must_write_file(test_file, 'module main')
 
 	mut app := &App{
 		temp_dir:   temp_dir
@@ -608,19 +717,16 @@ fn test_write_tracked_files_to_temp_single_file() {
 
 fn test_write_tracked_files_to_temp_multiple_files() {
 	temp_dir := os.join_path(os.temp_dir(), 'vls_interop_test2_${os.getpid()}')
-	os.mkdir_all(temp_dir) or { panic(err) }
-	defer {
-		os.rmdir_all(temp_dir) or {}
-	}
+	interop_test_must_mkdir_all(temp_dir)
 
 	project_dir := os.join_path(temp_dir, 'project')
-	os.mkdir_all(project_dir) or { panic(err) }
+	interop_test_must_mkdir_all(project_dir)
 
 	// Create original files
 	files := ['main.v', 'utils.v', 'helpers.v']
 	for file in files {
 		path := os.join_path(project_dir, file)
-		os.write_file(path, 'module main\n\nfn ${file}() {}') or { panic(err) }
+		interop_test_must_write_file(path, 'module main\n\nfn ${file}() {}')
 	}
 
 	mut app := &App{
@@ -654,18 +760,15 @@ fn test_write_tracked_files_to_temp_multiple_files() {
 
 fn test_write_tracked_files_to_temp_nested_directories() {
 	temp_dir := os.join_path(os.temp_dir(), 'vls_interop_test3_${os.getpid()}')
-	os.mkdir_all(temp_dir) or { panic(err) }
-	defer {
-		os.rmdir_all(temp_dir) or {}
-	}
+	interop_test_must_mkdir_all(temp_dir)
 
 	project_dir := os.join_path(temp_dir, 'project')
 	subdir := os.join_path(project_dir, 'src', 'internal')
-	os.mkdir_all(subdir) or { panic(err) }
+	interop_test_must_mkdir_all(subdir)
 
 	// Create nested file
 	nested_file := os.join_path(subdir, 'util.v')
-	os.write_file(nested_file, 'module internal') or { panic(err) }
+	interop_test_must_write_file(nested_file, 'module internal')
 
 	mut app := &App{
 		temp_dir:   temp_dir
@@ -690,21 +793,18 @@ fn test_write_tracked_files_to_temp_nested_directories() {
 
 fn test_write_tracked_files_skips_files_outside_working_dir() {
 	temp_dir := os.join_path(os.temp_dir(), 'vls_interop_test4_${os.getpid()}')
-	os.mkdir_all(temp_dir) or { panic(err) }
-	defer {
-		os.rmdir_all(temp_dir) or {}
-	}
+	interop_test_must_mkdir_all(temp_dir)
 
 	project_dir := os.join_path(temp_dir, 'project')
 	other_dir := os.join_path(temp_dir, 'other')
-	os.mkdir_all(project_dir) or { panic(err) }
-	os.mkdir_all(other_dir) or { panic(err) }
+	interop_test_must_mkdir_all(project_dir)
+	interop_test_must_mkdir_all(other_dir)
 
 	// Create files in both directories
 	project_file := os.join_path(project_dir, 'main.v')
 	other_file := os.join_path(other_dir, 'other.v')
-	os.write_file(project_file, 'module main') or { panic(err) }
-	os.write_file(other_file, 'module other') or { panic(err) }
+	interop_test_must_write_file(project_file, 'module main')
+	interop_test_must_write_file(other_file, 'module other')
 
 	mut app := &App{
 		temp_dir:   temp_dir
@@ -734,21 +834,18 @@ fn test_write_tracked_files_skips_files_outside_working_dir() {
 
 fn test_symlink_untracked_files_basic() {
 	temp_dir := os.join_path(os.temp_dir(), 'vls_symlink_test_${os.getpid()}')
-	os.mkdir_all(temp_dir) or { panic(err) }
-	defer {
-		os.rmdir_all(temp_dir) or {}
-	}
+	interop_test_must_mkdir_all(temp_dir)
 
 	project_dir := os.join_path(temp_dir, 'project')
 	target_dir := os.join_path(temp_dir, 'target')
-	os.mkdir_all(project_dir) or { panic(err) }
-	os.mkdir_all(target_dir) or { panic(err) }
+	interop_test_must_mkdir_all(project_dir)
+	interop_test_must_mkdir_all(target_dir)
 
 	// Create some V files
 	tracked_file := os.join_path(project_dir, 'tracked.v')
 	untracked_file := os.join_path(project_dir, 'untracked.v')
-	os.write_file(tracked_file, 'module main') or { panic(err) }
-	os.write_file(untracked_file, 'module main') or { panic(err) }
+	interop_test_must_write_file(tracked_file, 'module main')
+	interop_test_must_write_file(untracked_file, 'module main')
 
 	// Only track one file
 	mut tracked := map[string]string{}
@@ -767,20 +864,17 @@ fn test_symlink_untracked_files_basic() {
 
 fn test_symlink_untracked_files_nested() {
 	temp_dir := os.join_path(os.temp_dir(), 'vls_symlink_test2_${os.getpid()}')
-	os.mkdir_all(temp_dir) or { panic(err) }
-	defer {
-		os.rmdir_all(temp_dir) or {}
-	}
+	interop_test_must_mkdir_all(temp_dir)
 
 	project_dir := os.join_path(temp_dir, 'project')
 	subdir := os.join_path(project_dir, 'src')
 	target_dir := os.join_path(temp_dir, 'target')
-	os.mkdir_all(subdir) or { panic(err) }
-	os.mkdir_all(target_dir) or { panic(err) }
+	interop_test_must_mkdir_all(subdir)
+	interop_test_must_mkdir_all(target_dir)
 
 	// Create nested untracked file
 	nested_file := os.join_path(subdir, 'nested.v')
-	os.write_file(nested_file, 'module src') or { panic(err) }
+	interop_test_must_write_file(nested_file, 'module src')
 
 	tracked := map[string]string{}
 
@@ -796,19 +890,16 @@ fn test_symlink_untracked_files_nested() {
 
 fn test_symlink_untracked_files_empty_tracked() {
 	temp_dir := os.join_path(os.temp_dir(), 'vls_symlink_test3_${os.getpid()}')
-	os.mkdir_all(temp_dir) or { panic(err) }
-	defer {
-		os.rmdir_all(temp_dir) or {}
-	}
+	interop_test_must_mkdir_all(temp_dir)
 
 	project_dir := os.join_path(temp_dir, 'project')
 	target_dir := os.join_path(temp_dir, 'target')
-	os.mkdir_all(project_dir) or { panic(err) }
-	os.mkdir_all(target_dir) or { panic(err) }
+	interop_test_must_mkdir_all(project_dir)
+	interop_test_must_mkdir_all(target_dir)
 
 	// Create files
 	for i in 0 .. 3 {
-		os.write_file(os.join_path(project_dir, 'file${i}.v'), 'module main') or { panic(err) }
+		interop_test_must_write_file(os.join_path(project_dir, 'file${i}.v'), 'module main')
 	}
 
 	tracked := map[string]string{} // Empty - all files untracked

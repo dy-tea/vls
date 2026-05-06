@@ -3,7 +3,7 @@
   "publisher": "vlang",
   "displayName": "vls",
   "description": "vls",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -40,8 +40,7 @@
       "properties": {
         "vls.command": {
           "type": "string",
-          "default": "/tmp/vls2",
-          "description": "Path to the V language server binary."
+          "description": "Path to the V language server binary. If not set, the extension will attempt to find 'vls' in the system PATH."
         },
         "vls.args": {
           "type": "array",
@@ -52,6 +51,11 @@
           "type": "boolean",
           "default": true,
           "description": "Enable or disable inlay hints for V files."
+		},
+		"vls.diagnostics.enabled": {
+		  "type": "boolean",
+		  "default": true,
+		  "description": "Enable or disable live diagnostics from VLS for V files."
         }
       }
     }
@@ -78,6 +82,8 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
+    "glob": "^13.0.6",
+    "node": "^24.15.0",
     "vscode-languageclient": "^9.0.1"
   }
 }

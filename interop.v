@@ -24,6 +24,73 @@ fn path_to_uri(path string) string {
 	return uri_header + normalized
 }
 
+fn make_singlefile_temp_path(temp_root string, real_path string, purpose string) string {
+	root := if temp_root != '' { temp_root } else { os.temp_dir() }
+	ext := os.file_ext(real_path)
+	safe_ext := if ext == '' { '.v' } else { ext }
+	tag := if purpose == '' { 'work' } else { purpose }
+	return os.join_path(root, 'vls_${tag}_${os.getpid()}_${time.now().unix_nano()}${safe_ext}')
+}
+
+fn ensure_stderr_captured(cmd string) string {
+	if cmd.contains('2>&1') {
+		return cmd
+	}
+	return '${cmd} 2>&1'
+}
+
+fn shell_quote(s string) string {
+	escaped := s.replace("'", '\'"\'"\'')
+	return "'${escaped}'"
+}
+
+fn build_v_check_cmd_single(file_to_check string) string {
+	return 'v -w -vls-mode -check -json-errors -nocolor ${shell_quote(file_to_check)}'
+}
+
+fn build_v_check_cmd_multifile() string {
+	return 'v -w -check -json-errors -nocolor .'
+}
+
+fn build_v_line_info_cmd_multifile(rel_file string, line_info string) string {
+	return 'v -w -check -json-errors -nocolor -vls-mode -line-info ${shell_quote('${rel_file}:${line_info}')} .'
+}
+
+fn build_v_line_info_cmd_single(file_to_check string, line_info string, compile_target string) string {
+	vls_flag := '-vls-mode '
+	return 'v -w -check -json-errors -nocolor ${vls_flag}-line-info ${shell_quote('${file_to_check}:${line_info}')} ${shell_quote(compile_target)}'
+}
+
+fn build_v_fmt_cmd(temp_file string) string {
+	return 'v fmt -inprocess ${shell_quote(temp_file)}'
+}
+
+fn execute_in_dir(dir string, cmd string) os.Result {
+	original_dir := os.getwd()
+	defer {
+		os.chdir(original_dir) or {}
+	}
+	if dir != '' {
+		os.chdir(dir) or {
+			msg := 'Failed to change to working dir ${dir}: ${err}'
+			log(msg)
+			return os.Result{
+				exit_code: 1
+				output:    msg
+			}
+		}
+	}
+	return os.execute(ensure_stderr_captured(cmd))
+}
+
+fn cleanup_compilation_temp(temp_project_dir string, singlefile_tmppath string) {
+	if temp_project_dir != '' {
+		os.rmdir_all(temp_project_dir) or { log('Failed to clean up temp project dir: ${err}') }
+	} else if singlefile_tmppath != '' {
+		os.rm(singlefile_tmppath) or { log('Failed to remove temp file: ${err}') }
+	}
+}
+
 fn (mut app App) run_v_check(path string, text string) []JsonError {
 	real_path := uri_to_path(path)
 	working_dir := os.dir(real_path)
@@ -31,6 +98,17 @@ fn (mut app App) run_v_check(path string, text string) []JsonError {
 	mut file_to_check := ''
 	mut compile_target := ''
 	mut use_multifile := false
+	mut singlefile_tmppath := ''
+
+	// Check the diagnostics cache before invoking the compiler.
+	content_hash := text.hash()
+	gen := app.open_files_generation
+	if cached := app.diag_cache[path] {
+		if cached.content_hash == content_hash && cached.generation == gen {
+			log('Returning cached diagnostics for ${path}')
+			return cached.errors
+		}
+	}
 
 	log('running v.exe check for ${real_path}')
 	log('Open files count: ${app.open_files.len}')
@@ -59,36 +137,30 @@ fn (mut app App) run_v_check(path string, text string) []JsonError {
 
 	if !use_multifile {
 		log('USING SINGLEFILE')
-		tmppath := os.join_path(os.temp_dir(), os.file_name(real_path))
-		os.write_file(tmppath, text) or { panic(err) }
-		file_to_check = tmppath
-		compile_target = tmppath
+		singlefile_tmppath = make_singlefile_temp_path(app.temp_dir, real_path, 'check')
+		os.write_file(singlefile_tmppath, text) or {
+			log('Failed to write temp file ${singlefile_tmppath}: ${err}')
+			return []
+		}
+		file_to_check = singlefile_tmppath
+		compile_target = singlefile_tmppath
 	}
 
-	original_dir := os.getwd()
 	mut cmd := ''
 	if use_multifile {
-		os.chdir(compile_target) or { log('Failed to change to compile target dir: ${err}') }
-		cmd = 'v -w -check -json-errors -nocolor .'
+		cmd = build_v_check_cmd_multifile()
 		log('MULTIFILE CMD - compile_target=${compile_target}): ${cmd}')
 	} else {
-		os.chdir(working_dir) or { log('Failed to change to working dir: ${err}') }
-		cmd = 'v -w -vls-mode -check -json-errors -nocolor "${file_to_check}"'
+		cmd = build_v_check_cmd_single(file_to_check)
 		log('SINGLEFILE CMD: ${cmd}')
 	}
 
-	x := os.execute(cmd)
-	os.chdir(original_dir) or {}
+	exec_dir := if use_multifile { compile_target } else { working_dir }
+	x := execute_in_dir(exec_dir, cmd)
 
 	log('Check - RUN RES ${x}')
 
-	// Clean up temp files
-	if use_multifile && temp_project_dir != '' {
-		os.rmdir_all(temp_project_dir) or { log('Failed to clean up temp project dir: ${err}') }
-	} else if !use_multifile {
-		tmppath := os.join_path(os.temp_dir(), os.file_name(real_path))
-		os.rm(tmppath) or { log('Failed to remove temp file: ${err}') }
-	}
+	cleanup_compilation_temp(temp_project_dir, singlefile_tmppath)
 
 	json_errors := json.decode([]JsonError, x.output) or {
 		log('failed to parse json ${err}')
@@ -112,6 +184,7 @@ fn (mut app App) run_v_check(path string, text string) []JsonError {
 					err.path
 				}
 			}
+
 			if err_file == rel_path_to_check || err_file == os.file_name(real_path) {
 				updated_err := JsonError{
 					path:    real_path
@@ -119,6 +192,7 @@ fn (mut app App) run_v_check(path string, text string) []JsonError {
 					line_nr: err.line_nr
 					col:     err.col
 					len:     err.len
+					level:   err.level
 				}
 				filtered_errors << updated_err
 				log('INCLUDING ERROR from err_file=${err_file}: ${err.message}')
@@ -128,10 +202,20 @@ fn (mut app App) run_v_check(path string, text string) []JsonError {
 		}
 
 		log('FILTERED ERRORS: ${filtered_errors.len} of ${json_errors.len}')
+		app.diag_cache[path] = DiagCacheEntry{
+			content_hash: content_hash
+			generation:   gen
+			errors:       filtered_errors
+		}
 		return filtered_errors
 	}
 
 	log('JSON ERRORS: ${json_errors.len}')
+	app.diag_cache[path] = DiagCacheEntry{
+		content_hash: content_hash
+		generation:   gen
+		errors:       json_errors
+	}
 	return json_errors
 }
 
@@ -157,7 +241,8 @@ fn (mut app App) write_tracked_files_to_temp(working_dir string) !string {
 		}
 
 		// calc rel path
-		mut rel_path := normalized_real.replace(normalized_working, '').trim_string_left('/').trim_string_left('\\')
+		mut rel_path :=
+			normalized_real.replace(normalized_working, '').trim_string_left('/').trim_string_left('\\')
 		if rel_path == '' {
 			rel_path = os.file_name(real_path)
 		}
@@ -225,6 +310,43 @@ fn symlink_untracked_files(working_dir string, temp_dir string, tracked_files ma
 	}
 }
 
+// on_did_change_watched_files handles workspace/didChangeWatchedFiles.
+// When an externally tracked file is created, changed, or deleted on disk,
+// this notification keeps the in-memory open_files map consistent.
+fn (mut app App) on_did_change_watched_files(request Request) {
+	params := json.decode(DidChangeWatchedFilesParams, request.params) or {
+		$if debug { log('Failed to decode DidChangeWatchedFilesParams: ${err}') }
+		return
+	}
+	for change in params.changes {
+		uri := change.uri
+		match change.event_type {
+			3 {
+				// Deleted — remove from tracking if present.
+				if uri in app.open_files {
+					app.open_files.delete(uri)
+					app.open_files_generation++
+					log('on_did_change_watched_files: removed deleted file ${uri}')
+				}
+			}
+			1, 2 {
+				// Created or Changed — reload from disk if currently tracked.
+				if uri in app.open_files {
+					real_path := uri_to_path(uri)
+					content := os.read_file(real_path) or {
+						log('on_did_change_watched_files: cannot read ${real_path}: ${err}')
+						continue
+					}
+					app.open_files[uri] = content
+					app.open_files_generation++
+					log('on_did_change_watched_files: reloaded ${uri}')
+				}
+			}
+			else {}
+		}
+	}
+}
+
 fn (mut app App) run_v_line_info(method Method, path string, line_info string) ResponseResult {
 	// Convert URI to local file path
 	real_path := uri_to_path(path)
@@ -235,8 +357,10 @@ fn (mut app App) run_v_line_info(method Method, path string, line_info string) R
 	mut compile_target := real_path
 	mut temp_project_dir := ''
 	mut use_multifile := false
+	mut singlefile_tmppath := ''
 
-	if method == .definition {
+	if method == .definition || method == .declaration || method == .type_definition
+		|| method == .implementation {
 		log('OPEN FILES COUNT: ${app.open_files.len}')
 		if app.open_files.len > 1 || has_sibling_v_files(working_dir, real_path) {
 			temp_project_dir = app.write_tracked_files_to_temp(working_dir) or {
@@ -289,35 +413,43 @@ fn (mut app App) run_v_line_info(method Method, path string, line_info string) R
 
 		if !use_multifile {
 			log('SINGLEFILE method=${method}')
-			tmppath := os.join_path(os.temp_dir(), os.file_name(real_path))
-			log('WRITING FILE ${time.now()} to temp path ${tmppath}')
-			os.write_file(tmppath, app.text) or { panic(err) }
-			file_to_check = tmppath
-			compile_target = tmppath
+			singlefile_tmppath = make_singlefile_temp_path(app.temp_dir, real_path, 'lineinfo')
+			log('WRITING FILE ${time.now()} to temp path ${singlefile_tmppath}')
+			mut wrote_temp := true
+			os.write_file(singlefile_tmppath, app.text) or {
+				wrote_temp = false
+				log('Failed to write temp file ${singlefile_tmppath}: ${err}')
+				// Fall back to reading from disk instead of crashing.
+				file_to_check = real_path
+				compile_target = real_path
+				use_multifile = false
+			}
+			if wrote_temp {
+				file_to_check = singlefile_tmppath
+				compile_target = singlefile_tmppath
+			}
 		}
 	}
 
 	log('running v.exe line info!')
 	log('file_to_check=${file_to_check}, compile_target=${compile_target}, working_dir=${working_dir}')
-	original_dir := os.getwd()
 	mut cmd := ''
 
 	if use_multifile {
-		os.chdir(compile_target) or { log('Failed to change to compile target dir: ${err}') }
 		rel_file := os.file_name(file_to_check)
-		cmd = 'v -w -check -json-errors -nocolor -vls-mode -line-info "${rel_file}:${line_info}" .'
+		cmd = build_v_line_info_cmd_multifile(rel_file, line_info)
 		log('MULTIFILE CMD compile_target=${compile_target}: ${cmd}')
 	} else {
-		os.chdir(working_dir) or { log('Failed to change to working dir: ${err}') }
-		vls_flag := '-vls-mode '
-		cmd = 'v -w -check -json-errors -nocolor ${vls_flag}-line-info "${file_to_check}:${line_info}" ${compile_target}'
+		cmd = build_v_line_info_cmd_single(file_to_check, line_info, compile_target)
 		log('SINGLEFILE CMD: ${cmd}')
 	}
 
-	mut x := os.execute(cmd)
-	os.chdir(original_dir) or {}
+	exec_dir := if use_multifile { compile_target } else { working_dir }
+	mut x := execute_in_dir(exec_dir, cmd)
 
-	if method == .definition && use_multifile && (x.exit_code != 0 || x.output.trim_space() == ''
+	if (method == .definition || method == .declaration || method == .type_definition
+		|| method == .implementation) && use_multifile
+		&& (x.exit_code != 0 || x.output.trim_space() == ''
 		|| x.output.trim_space() == '[]') {
 		if temp_project_dir != '' {
 			os.rmdir_all(temp_project_dir) or { log('Failed to clean up temp project dir: ${err}') }
@@ -325,32 +457,31 @@ fn (mut app App) run_v_line_info(method Method, path string, line_info string) R
 		}
 		file_to_check = real_path
 		compile_target = real_path
-		cmd_fallback := 'v -w -check -json-errors -nocolor -vls-mode -line-info "${file_to_check}:${line_info}" ${compile_target}'
+		cmd_fallback := build_v_line_info_cmd_single(file_to_check, line_info, compile_target)
 		log('cmd_fallback=${cmd_fallback}')
-		original_dir_fallback := os.getwd()
-		os.chdir(working_dir) or { log('Failed to change to working dir: ${err}') }
-		x = os.execute(cmd_fallback)
-		os.chdir(original_dir_fallback) or {}
+		x = execute_in_dir(working_dir, cmd_fallback)
 		log('Fallback RUN RES ${x}')
 	}
 
-	// Clean up temp files
-	if temp_project_dir != '' {
-		os.rmdir_all(temp_project_dir) or { log('Failed to clean up temp project dir: ${err}') }
-	} else if !use_multifile {
-		tmppath := os.join_path(os.temp_dir(), os.file_name(real_path))
-		os.rm(tmppath) or { log('Failed to remove temp file: ${err}') }
-	}
+	cleanup_compilation_temp(temp_project_dir, singlefile_tmppath)
 
 	log('RUN RES ${x}')
-	mut result := ResponseResult{}
+	// Default to JSON null so any unhandled method branch produces a valid LSP response.
+	mut result := ResponseResult('null')
 	match method {
 		.completion {
 			result_tmp := json.decode(JsonVarAC, x.output) or { JsonVarAC{} }
 			result = result_tmp.details
 		}
 		.signature_help {
-			result = json.decode(SignatureHelp, x.output) or { SignatureHelp{} }
+			sig := json.decode(SignatureHelp, x.output) or { SignatureHelp{} }
+			// Return null when the compiler found no active signature so editors do not show
+			// empty signature popups (LSP spec: SignatureHelp | null).
+			if sig.signatures.len == 0 {
+				result = 'null'
+			} else {
+				result = sig
+			}
 		}
 		.hover {
 			// Decode the Hover JSON emitted by the compiler's hv^ mode.
@@ -369,8 +500,7 @@ fn (mut app App) run_v_line_info(method Method, path string, line_info string) R
 				if cursor_line >= 0 && cursor_line < file_lines.len {
 					cursor_symbol = get_word_at_col(file_lines[cursor_line], cursor_col)
 					if cursor_symbol != '' {
-						doc = app.find_doc_comment_for_symbol(cursor_symbol, file_lines,
-							path)
+						doc = app.find_doc_comment_for_symbol(cursor_symbol, file_lines, path)
 					}
 				}
 			}
@@ -395,19 +525,17 @@ fn (mut app App) run_v_line_info(method Method, path string, line_info string) R
 					}
 				}
 			} else {
-				result = Hover{
-					contents: MarkupContent{
-						kind:  'plaintext'
-						value: ''
-					}
-				}
+				// Compiler returned no info and no vdoc comment — return null per LSP spec
+				// so editors do not show empty hover popups.
+				result = 'null'
 			}
 		}
-		.definition {
+		.definition, .declaration, .type_definition, .implementation {
 			// file.v:line:col => Location
 			fields := x.output.trim_space().split(':')
 			if fields.len < 3 || x.output.trim_space() == '' {
-				result = Location{}
+				// No definition found — return null so the client does not navigate anywhere.
+				result = 'null'
 			} else {
 				line_nr := fields[fields.len - 2].int() - 1
 				col := fields[fields.len - 1].int()
@@ -428,6 +556,7 @@ fn (mut app App) run_v_line_info(method Method, path string, line_info string) R
 							uri_path
 						}
 					}
+
 					log('MAPPED TO uri_path=${uri_path}')
 				}
 				uri_header := if uri_path.starts_with('/') { 'file://' } else { 'file:///' }
@@ -448,5 +577,6 @@ fn (mut app App) run_v_line_info(method Method, path string, line_info string) R
 		}
 		else {}
 	}
+
 	return result
 }
