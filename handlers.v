@@ -1348,7 +1348,12 @@ fn (mut app App) format_content(uri string, content string) ([]TextEdit, string)
 		return []TextEdit{}, ''
 	}
 
+	// With -w flag, v fmt writes the formatted content back to the temp file.
+	// Read from there instead of relying on stdout capture, which is
+	// unreliable on Windows MSYS2.
 	result := os.execute(ensure_stderr_captured(build_v_fmt_cmd(temp_file)))
+
+	mut formatted := os.read_file(temp_file) or { result.output }
 
 	os.rm(temp_file) or {
 		$if debug { log('Failed to remove temp file: ${err}') }
@@ -1359,7 +1364,7 @@ fn (mut app App) format_content(uri string, content string) ([]TextEdit, string)
 		return []TextEdit{}, ''
 	}
 
-	if result.output == content {
+	if formatted == '' || formatted == content {
 		return []TextEdit{}, ''
 	}
 
@@ -1378,9 +1383,9 @@ fn (mut app App) format_content(uri string, content string) ([]TextEdit, string)
 				char: last_char
 			}
 		}
-		new_text: result.output
+		new_text: formatted
 	}
-	return [edit], result.output
+	return [edit], formatted
 }
 
 // handle_formatting handles the LSP formatting request, returning edits to format the document.
